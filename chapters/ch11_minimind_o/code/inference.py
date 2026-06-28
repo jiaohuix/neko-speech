@@ -2,30 +2,26 @@
 SimpleOmni Inference Demo
 =========================
 
-Demonstrates text-to-speech and audio-to-audio generation
-using the trained SimpleOmni model.
+Demonstrates text-to-speech, speech-to-text, and image+text-to-speech
+generation using the trained SimpleOmni model.
 
 Modes:
-  1. Text-to-Speech (T2A): Type text → get speech output
-  2. Audio-to-Audio (A2A): Speak into microphone → get speech response
-  3. Voice Cloning: Use reference audio to control output voice
-
-Based on eval_omni.py from the MiniMind-O repository.
+  1. Text-to-Speech (T2A): Type text -> get speech output (mel spectrogram)
+  2. Speech-to-Text (A2T): Provide audio -> get text response
+  3. Image+Text-to-Speech (I2A): Provide image + text -> get speech
+  4. Streaming demo: demonstrates delay pattern visualization
 
 Usage:
-    # Text-to-Speech
-    python inference.py --mode t2a --weight ./checkpoints/a2a_epoch1.pth
-
-    # Audio-to-Audio (with reference audio)
-    python inference.py --mode a2a --weight ./checkpoints/a2a_epoch1.pth --ref_audio ref.wav
-
-    # Voice cloning
-    python inference.py --mode clone --weight ./checkpoints/a2a_epoch1.pth --ref_voice speaker.wav
+    python inference.py --mode t2a --text "Hello, I am Neko."
+    python inference.py --mode a2t --mel_file input_mel.pt
+    python inference.py --mode i2a --text "What is in this image?" --image_file img.pt
+    python inference.py --mode stream_demo
 """
 
 import os
 import argparse
 import torch
+import torch.nn.functional as F
 import numpy as np
 
 from model import SimpleOmni, SimpleOmniConfig, count_parameters
@@ -36,23 +32,17 @@ from model import SimpleOmni, SimpleOmniConfig, count_parameters
 # ===========================================================================
 
 def load_model(weight_path: str, config: SimpleOmniConfig = None,
-               device: str = "cuda") -> tuple:
-    """Load trained SimpleOmni model.
-
-    In a complete implementation, this would also load:
-    - SenseVoice (frozen audio encoder) for speech input
-    - Mimi (frozen audio codec) for speech output decoding
-    - Tokenizer for text processing
-    """
+               device: str = "cuda") -> SimpleOmni:
+    """Load trained SimpleOmni model."""
     config = config or SimpleOmniConfig()
     model = SimpleOmni(config)
 
-    if os.path.exists(weight_path):
+    if weight_path and os.path.exists(weight_path):
         state_dict = torch.load(weight_path, map_location="cpu")
         model.load_state_dict(state_dict, strict=False)
         print(f"Loaded weights from {weight_path}")
 
-    model = model.half().eval().to(device)
+    model = model.eval().to(device)
     count_parameters(model, verbose=False)
     return model
 
@@ -61,155 +51,191 @@ def load_model(weight_path: str, config: SimpleOmniConfig = None,
 # Text-to-Speech Generation
 # ===========================================================================
 
-def text_to_speech(model, text: str, tokenizer=None, max_new_tokens=256,
+def text_to_speech(model: SimpleOmni, text: str, max_new_tokens=64,
                    temperature=0.75, top_p=0.9, device="cuda"):
-    """Generate speech from text input.
+    """Generate speech (mel spectrogram) from text input.
 
     Pipeline:
-    1. Tokenize text → input_ids
-    2. Model forward → text_logits + audio_logits
-    3. Sample text tokens autoregressively
-    4. Sample audio codes with delay pattern
-    5. Decode Mimi codes → 24kHz waveform
+    1. Create dummy text tokens (placeholder for real tokenizer)
+    2. model.generate() -> text tokens + audio codes + mel spectrogram
+    3. Save mel spectrogram as output
 
-    Args:
-        model: trained SimpleOmni model
-        text: input text string
-        tokenizer: text tokenizer (TODO: integrate)
-        max_new_tokens: max tokens to generate
-        temperature: sampling temperature
-        top_p: nucleus sampling threshold
-        device: compute device
-
-    Returns:
-        dict with 'text_output' (str) and 'audio' (numpy array at 24kHz)
+    In production, replace dummy tokens with real tokenizer output
+    and decode mel via vocoder (or Mimi codes via Mimi decoder).
     """
-    # TODO: implement with tokenizer
-    # For now, demonstrate the generation loop structure
+    config = model.config
+    # Placeholder tokenizer: map chars to token IDs
+    text_ids = [config.bos_token_id]
+    for ch in text[:64]:
+        text_ids.append(max(3, ord(ch) % config.vocab_size))
+
+    input_ids = torch.tensor([text_ids], dtype=torch.long, device=device)
 
     print(f"[Thinker]: Generating response to '{text}'...")
+    result = model.generate(
+        input_ids, max_new_tokens=max_new_tokens,
+        temperature=temperature, top_p=top_p,
+    )
 
-    # Placeholder: in real implementation, tokenize and generate
-    # input_ids = tokenizer.encode(text)
-    # for step in range(max_new_tokens):
-    #     out = model(input_ids)
-    #     text_token = sample(out['text_logits'])
-    #     audio_codes = sample_mtp(out['audio_logits'])
-    #     if audio_step >= num_codebooks:
-    #         frame = read_diagonal(audio_codes)
-    #         audio_chunk = mimi.decode(frame)
-    #         play(audio_chunk)  # streaming!
+    gen_text_len = result["text_ids"].shape[1]
+    mel_shape = result["mel"].shape
+    audio_shape = result["audio_codes"].shape
 
-    return {
-        "text_output": "TODO: implement generation",
-        "audio": None,
-    }
+    print(f"  Generated text tokens: {gen_text_len}")
+    print(f"  Audio codes shape: {audio_shape} "
+          f"({audio_shape[1]} codebooks x {audio_shape[2]} frames)")
+    print(f"  Mel spectrogram shape: {mel_shape} "
+          f"({mel_shape[1]} frames x {mel_shape[2]} mel bins)")
+
+    return result
 
 
 # ===========================================================================
-# Audio-to-Audio Generation
+# Speech-to-Text (Audio Input -> Text Output)
 # ===========================================================================
 
-def audio_to_audio(model, audio_path: str, tokenizer=None,
-                   max_new_tokens=256, device="cuda"):
-    """Generate speech response to speech input.
+def speech_to_text(model: SimpleOmni, mel_input: torch.Tensor,
+                   max_new_tokens=64, temperature=0.75, device="cuda"):
+    """Generate text response from speech input.
 
     Pipeline:
-    1. Load audio → resample to 16kHz
-    2. SenseVoice encoder → audio features
-    3. Audio projector → inject into Thinker sequence
-    4. Generate response (same as T2A from here)
-
-    Args:
-        model: trained SimpleOmni model
-        audio_path: path to input audio file (wav/mp3)
-        tokenizer: text tokenizer
-        max_new_tokens: max tokens to generate
-        device: compute device
+    1. Encode speech via SimpleSpeechEncoder
+    2. Project into Thinker hidden space
+    3. Thinker processes audio features + generates text tokens
     """
-    print(f"[A2A]: Processing audio from '{audio_path}'...")
+    config = model.config
+    mel_input = mel_input.unsqueeze(0).to(device)  # add batch dim
 
-    # TODO: implement
-    # wav, sr = sf.read(audio_path)
-    # if sr != 16000: wav = librosa.resample(wav, orig_sr=sr, target_sr=16000)
-    # features = sensevoice.encode(wav)
-    # projected = model.audio_proj(features)
-    # ... generate response ...
+    # Prompt: "respond to the audio"
+    prompt_ids = [config.bos_token_id, 10, 20, 30]  # placeholder tokens
+    input_ids = torch.tensor([prompt_ids], dtype=torch.long, device=device)
 
-    return {
-        "text_output": "TODO: implement",
-        "audio": None,
-    }
+    print("[Thinker]: Processing speech input...")
+    result = model.generate(
+        input_ids, max_new_tokens=max_new_tokens,
+        temperature=temperature, mel_input=mel_input,
+    )
+
+    gen_text_len = result["text_ids"].shape[1]
+    print(f"  Generated {gen_text_len} text tokens in response")
+
+    return result
 
 
 # ===========================================================================
-# Voice Cloning
+# Image+Text-to-Speech
 # ===========================================================================
 
-def voice_clone(model, text: str, reference_audio: str,
-                tokenizer=None, max_new_tokens=256, device="cuda"):
-    """Generate speech in a target voice from reference audio.
+def image_text_to_speech(model: SimpleOmni, text: str,
+                          image: torch.Tensor,
+                          max_new_tokens=64, temperature=0.75, device="cuda"):
+    """Generate speech response from image + text input.
 
     Pipeline:
-    1. Encode reference audio → ref_codes (Mimi) + spk_emb (CAM++)
-    2. Inject ref_codes and spk_emb into generation
-    3. Generate speech that mimics the reference voice
-
-    The model uses two voice signals:
-    - ref_codes: Mimi-encoded audio placed before the response (context)
-    - spk_emb: CAM++ speaker embedding projected into Talker hidden space
-
-    During training, ref_codes are dropped 50% of the time, so the model
-    learns to rely on spk_emb as a stable voice anchor.
+    1. Encode image via SimpleImageEncoder -> patch features
+    2. Thinker processes image features + text tokens
+    3. Talker generates audio codes
+    4. Decode to mel spectrogram
     """
-    print(f"[Clone]: Generating '{text}' in voice from '{reference_audio}'...")
+    config = model.config
+    image = image.unsqueeze(0).to(device)  # add batch dim
 
-    # TODO: implement
-    # ref_wav = load_audio(reference_audio, sr=24000)
-    # ref_codes = mimi.encode(ref_wav)  # (8, T_ref) or (4, T_ref)
-    # spk_emb = campp.encode(ref_wav)   # (192,)
-    # ... generate with conditioning ...
+    text_ids = [config.bos_token_id]
+    for ch in text[:64]:
+        text_ids.append(max(3, ord(ch) % config.vocab_size))
+    input_ids = torch.tensor([text_ids], dtype=torch.long, device=device)
 
-    return {
-        "text_output": "TODO: implement",
-        "audio": None,
-    }
+    print(f"[Thinker]: Processing image + text '{text}'...")
+    result = model.generate(
+        input_ids, max_new_tokens=max_new_tokens,
+        temperature=temperature, image_input=image,
+    )
+
+    mel_shape = result["mel"].shape
+    print(f"  Mel spectrogram: {mel_shape}")
+
+    return result
 
 
 # ===========================================================================
-# Streaming Playback (Conceptual)
+# Streaming Generation Demo
 # ===========================================================================
 
-def streaming_playback_demo():
-    """Demonstrate how streaming audio playback works.
+def streaming_demo(model: SimpleOmni, text: str = "Hello world",
+                   max_new_tokens=32, device="cuda"):
+    """Demonstrate streaming generation with delay pattern.
 
-    The key idea: Mimi can decode partial code sequences incrementally.
-    As soon as all codebooks have produced codes for a time step,
-    that frame can be decoded and played.
-
-    Timeline for 4 codebooks (teaching version):
-    Step 0: CB-0 produces code → wait
-    Step 1: CB-1 produces code → wait
-    Step 2: CB-2 produces code → wait
-    Step 3: CB-3 produces code → FRAME 0 complete! → decode & play
-    Step 4: CB-0 produces code → wait
-    Step 5: CB-1 produces code → wait
-    Step 6: CB-2 produces code → wait
-    Step 7: CB-3 produces code → FRAME 1 complete! → decode & play
-    ...
-
-    Latency = num_codebooks / text_generation_rate
-    For 4 codebooks at ~20 tokens/sec: 4/20 = 0.2 sec to first audio
-    For 8 codebooks at ~20 tokens/sec: 8/20 = 0.4 sec to first audio
+    Shows how audio frames become available incrementally as
+    codebooks finish their staggered generation.
     """
-    print("Streaming playback demo (conceptual)")
-    print("=" * 50)
-    num_codebooks = 4
-    for step in range(12):
-        active_cbs = [i for i in range(num_codebooks) if step >= i]
-        frame_ready = step >= num_codebooks - 1 and (step - num_codebooks + 1) % 1 == 0
-        print(f"  Step {step:2d}: active CBs = {active_cbs}, "
-              f"frame ready = {frame_ready}")
+    config = model.config
+    text_ids = [config.bos_token_id]
+    for ch in text[:32]:
+        text_ids.append(max(3, ord(ch) % config.vocab_size))
+    input_ids = torch.tensor([text_ids], dtype=torch.long, device=device)
+
+    print(f"\n[Streaming Demo] Generating response to '{text}'")
+    print(f"  Codebooks: {config.num_codebooks}")
+    print(f"  Delay to first frame: {config.num_codebooks} steps")
+    print()
+
+    frame_count = 0
+    for step, (text_tok, audio_frame) in enumerate(
+            model.stream_generate(input_ids, max_new_tokens=max_new_tokens)):
+        if audio_frame is not None:
+            frame_count += 1
+            print(f"  Step {step:3d}: text_token={text_tok.item():5d}, "
+                  f"audio_frame={audio_frame}")
+        else:
+            print(f"  Step {step:3d}: text_token={text_tok.item():5d}, "
+                  f"audio_frame=None (waiting for delay pattern)")
+
+    print(f"\n  Total frames generated: {frame_count}")
+    print(f"  Latency to first frame: {config.num_codebooks} steps")
+
+
+# ===========================================================================
+# Delay Pattern Visualization
+# ===========================================================================
+
+def visualize_delay_pattern(num_codebooks=4, total_steps=12):
+    """Print a visual representation of the delay pattern.
+
+    Shows when each codebook starts generating and when complete
+    frames become available for decoding.
+    """
+    print("\nDelay Pattern Visualization")
+    print("=" * 60)
+    print(f"  Codebooks: {num_codebooks}, Steps: {total_steps}")
+    print()
+
+    # Header
+    header = "  Step: " + " ".join(f"{s:3d}" for s in range(total_steps))
+    print(header)
+    print("  " + "-" * (len(header) - 2))
+
+    # Each codebook row
+    for cb in range(num_codebooks):
+        row = f"  CB-{cb}:  "
+        for step in range(total_steps):
+            if step >= cb:
+                row += "  * "  # active
+            else:
+                row += "  . "  # waiting
+        print(row)
+
+    # Complete frame row
+    print("  " + "-" * (len(header) - 2))
+    row = "  Frame: "
+    for step in range(total_steps):
+        if step >= num_codebooks - 1:
+            row += f"{step - num_codebooks + 1:3d}"
+        else:
+            row += "  . "
+    print(row)
+    print()
+    print(f"  First complete frame at step {num_codebooks - 1}")
+    print(f"  Frame rate: ~12.5 Hz (one frame per step)")
 
 
 # ===========================================================================
@@ -219,40 +245,49 @@ def streaming_playback_demo():
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="SimpleOmni Inference")
     parser.add_argument("--mode", type=str, default="t2a",
-                        choices=["t2a", "a2a", "clone", "stream_demo"],
+                        choices=["t2a", "a2t", "i2a", "stream", "delay_pattern"],
                         help="Inference mode")
-    parser.add_argument("--weight", type=str, required=True,
+    parser.add_argument("--weight", type=str, default=None,
                         help="Path to trained model weights")
     parser.add_argument("--text", type=str, default="Hello, I am Neko.",
-                        help="Input text (for t2a and clone modes)")
-    parser.add_argument("--audio", type=str, default=None,
-                        help="Input audio file (for a2a mode)")
-    parser.add_argument("--ref_voice", type=str, default=None,
-                        help="Reference voice for cloning")
-    parser.add_argument("--output", type=str, default="./output.wav",
-                        help="Output audio file path")
-    parser.add_argument("--max_new_tokens", type=int, default=256)
+                        help="Input text")
+    parser.add_argument("--mel_file", type=str, default=None,
+                        help="Path to mel tensor (.pt) for a2t mode")
+    parser.add_argument("--image_file", type=str, default=None,
+                        help="Path to image tensor (.pt) for i2a mode")
+    parser.add_argument("--max_new_tokens", type=int, default=64)
     parser.add_argument("--temperature", type=float, default=0.75)
     parser.add_argument("--top_p", type=float, default=0.9)
     parser.add_argument("--device", type=str, default="cuda")
 
     args = parser.parse_args()
 
-    if args.mode == "stream_demo":
-        streaming_playback_demo()
+    if args.mode == "delay_pattern":
+        visualize_delay_pattern(num_codebooks=4, total_steps=16)
     else:
         config = SimpleOmniConfig()
         model = load_model(args.weight, config, args.device)
 
         if args.mode == "t2a":
-            result = text_to_speech(model, args.text, device=args.device)
-        elif args.mode == "a2a":
-            if not args.audio:
-                print("Error: --audio required for a2a mode")
+            result = text_to_speech(model, args.text, args.max_new_tokens,
+                                    args.temperature, args.top_p, args.device)
+        elif args.mode == "a2t":
+            if args.mel_file and os.path.exists(args.mel_file):
+                mel = torch.load(args.mel_file)
             else:
-                result = audio_to_audio(model, args.audio, device=args.device)
-        elif args.mode == "clone":
-            if not args.ref_voice:
-                print("Error: --ref_voice required for clone mode")
+                # Generate random mel for demo
+                mel = torch.randn(config.n_mels, 256)
+                print("Using random mel spectrogram for demo")
+            result = speech_to_text(model, mel, args.max_new_tokens,
+                                    args.temperature, args.device)
+        elif args.mode == "i2a":
+            if args.image_file and os.path.exists(args.image_file):
+                image = torch.load(args.image_file)
             else:
-                result = voice_clone(model, args.text, args.ref_voice, device=args.device)
+                image = torch.randn(3, config.image_size, config.image_size)
+                print("Using random image for demo")
+            result = image_text_to_speech(model, args.text, image,
+                                          args.max_new_tokens,
+                                          args.temperature, args.device)
+        elif args.mode == "stream":
+            streaming_demo(model, args.text, args.max_new_tokens, args.device)

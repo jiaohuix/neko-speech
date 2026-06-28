@@ -12,14 +12,23 @@
 
 ---
 
-## 2. 已完成内容
+## 2. 已完成与计划中内容
 
-| 章节 | 内容 | 状态 | 资产 |
-|------|------|------|------|
-| **Ch01** | 音频基础：波形、采样、FFT、STFT、Mel、Griffin-Lim | 完成 | 5个演示脚本 + 5张Neko插画 |
-| **Ch02** | Tacotron2：端到端TTS | 训练中 | model.py / train.py / inference.py / test_tts.py / eval_reconstruct.py |
-| **Ch07** | VALL-E：Codec LM 范式，AR+NAR 零样本 TTS | 完成 | codec.py / valle.py / generate.py / train.py |
-| **数据集** | Neko Audio 80K（ModelScope） | 下载中 | ~858条/目标3000+ |
+| 章节 | 内容 | 状态 | 参数量 | 关键特性 |
+|------|------|------|--------|----------|
+| **Ch01** | 音频基础：波形、采样、FFT、STFT、Mel、Griffin-Lim | ✅ 完成 | - | 5个演示脚本 + 5张Neko插画 |
+| **Ch02** | Tacotron2：Seq2Seq + Attention | 🔄 训练中 | 26.7M | 自回归基线 |
+| **Ch03** | WaveNet：因果卷积声码器 | ✅ 完成 | 1.9M | 感受野 6139 |
+| **Ch04** | FastSpeech2：非自回归并行 | ✅ 完成 | 7.55M | **19x 实时** |
+| **Ch05** | VITS：VAE+Flow+GAN 端到端 | ✅ 完成 | ~45M | 最复杂章节 |
+| **Ch06** | Neural Codec：RVQ-VAE | ✅ 完成 | 1.3M | 8× 时间压缩 |
+| **Ch07** | VALL-E：Codec Language Model | ✅ 完成 | 10.8M | 零样本克隆 |
+| **Ch08** | Modern Models: F5-TTS/CosyVoice/IndexTTS | ✅ 完成 | ~5M | Flow Matching |
+| **Ch09** | GPT-SoVITS: 少样本声音克隆 | 🚧 实施中 | ~50M | AR+VITS 两阶段 |
+| **Ch10** | VoxCPM: Tokenizer-free TTS | 🚧 实施中 | ~100M | 扩散自回归 |
+| **Ch11** | MiniMind-O: 全模态语音模型 | 📋 计划中 | ~115M | Thinker-Talker |
+| **Ch12** | 端侧部署: ONNX/MNN/sherpa-onnx | 📋 计划中 | - | Android/iOS |
+| **数据集** | Neko Audio 80K | 🔄 下载中 | - | ~858条/目标3000+ |
 
 ### Ch02 当前状态
 

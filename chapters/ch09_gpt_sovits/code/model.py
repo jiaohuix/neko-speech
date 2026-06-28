@@ -1071,6 +1071,10 @@ class GPTSoVITS(nn.Module):
         return y_hat, m_p, logs_p, m_q, logs_q
 
 
+# Alias for convenience: `from model import SoVITS`
+SoVITS = GPTSoVITS
+
+
 # ===================================================================
 # Loss functions
 # ===================================================================

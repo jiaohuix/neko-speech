@@ -1,756 +1,864 @@
-# Ch09: GPT-SoVITS -- Few-Shot 声音克隆
+# Ch09: GPT-SoVITS -- Few-Shot Voice Cloning
 
-> 前面几章，Neko 学会了从文本生成语音 (Ch02-Ch05)，
-> 还学会了把音频编码成离散 Token (Ch06)，
-> 甚至用 VALL-E 的思路"听一遍就会说" (Ch07)。
+> In previous chapters, Neko learned to synthesize speech from text (Ch02-Ch05),
+> compress audio into discrete tokens (Ch06),
+> and even clone voices with VALL-E's multi-layer codec approach (Ch07).
 >
-> 但 VALL-E 需要多层 codec tokens，AR 模型要预测 8 层 × 50Hz 的序列，很慢。
-> 有没有更聪明的办法？
+> But VALL-E's AR model must predict 8 codec layers x 50Hz = 400 tokens/second.
+> That's slow. Can we do better?
 >
-> 这一章，Neko 要学 **GPT-SoVITS** —— 只用 **1 层语义 Token** 就能克隆声音。
-
-## 本章导学
-
-### 为什么需要 GPT-SoVITS？
-
-回顾 VALL-E 的架构：
-
-| 问题 | VALL-E 的做法 | 代价 |
-|------|-------------|------|
-| 音频如何变成 Token？ | EnCodec 多层码本 (n_q=8) | 每帧 8 个 Token |
-| AR 模型预测什么？ | 逐层自回归 (AR + NAR) | 序列长度 = 50Hz × 8层 |
-| 需要多少参考音频？ | 3-10 秒 | 需要 codec 预训练 |
-
-GPT-SoVITS 的核心洞察：**不是所有 Token 层都同等重要**。
-
-HuBERT 的第一层量化码本已经捕获了绝大部分**语义信息**（说了什么），
-而**音色信息**（谁在说）可以通过参考音频直接传递给声码器。
-
-```
-VALL-E:     文本 + 参考 → AR(8层tokens) → Codec Decoder → 波形
-                          很慢，序列长
-
-GPT-SoVITS: 文本 + 参考 → AR(1层tokens) → VITS Vocoder → 波形
-                          快 8 倍，质量更好
-```
-
-### GPT-SoVITS 的核心创新
-
-```
-                  ┌── AR Transformer (GPT-style): 文本 → 语义 Token
-文本 ─→ GPT-SoVITS ─┤
-                  └── SoVITS Vocoder (VITS-based): Token + 参考音频 → 波形
-```
-
-1. **单层语义 Token (n_q=1)**：AR 模型只需预测 1 个 Token/帧，序列短 8 倍
-2. **VITS 声码器**：比 codec decoder 质量更高，端到端生成波形
-3. **两阶段分离**：AR 管"说什么"，声码器管"怎么说"
-
-### 学习路线
-
-| 节 | 内容 | 目标 |
-|---|------|------|
-| 9.1 | 系统架构总览 | 理解两阶段数据流 |
-| 9.2 | 语义 Token：为什么 n_q=1 就够了？ | 理解语义 vs 声学 Token |
-| 9.3 | AR 模型：GPT-style Transformer | 理解注意力掩码设计 |
-| 9.4 | SoVITS 声码器：VITS 变体 | 理解 TextEncoder 和 VAE+Flow |
-| 9.5 | 两阶段训练 | 理解分离训练的动机 |
-| 9.6 | 推理流程 | 端到端：文本 + 参考 → 波形 |
-| 9.7 | 代码走读 | 完整实现解析 |
-| 9.8 | 与 VALL-E 的对比 | 理解设计权衡 |
-| 9.9 | ONNX 导出 | 部署优化 |
+> This chapter: **GPT-SoVITS** -- voice cloning with just **1 semantic token per frame**.
 
 ---
 
-## 9.1 系统架构总览
+## Chapter Guide
 
-### 推理时的完整数据流
+### Why GPT-SoVITS?
+
+Recall VALL-E's architecture from Ch07:
+
+| Problem | VALL-E's Approach | Cost |
+|---------|-------------------|------|
+| How to tokenize audio? | EnCodec multi-layer codebook (n_q=8) | 8 tokens per frame |
+| What does the AR model predict? | Layer-by-layer (AR + NAR) | Sequence = 50Hz x 8 layers |
+| Reference audio needed? | 3-10 seconds | Requires codec pretraining |
+
+GPT-SoVITS's core insight: **not all token layers are equally important**.
+
+HuBERT's first quantization codebook already captures most of the **semantic information**
+(what is said), while **timbre information** (who says it) can be passed directly
+to the vocoder via reference audio.
 
 ```
-  参考音频 (3-10s, 16kHz)
+VALL-E:     Text + Ref -> AR(8-layer tokens) -> Codec Decoder -> Waveform
+                          Slow, long sequences
+
+GPT-SoVITS: Text + Ref -> AR(1-layer tokens) -> VITS Vocoder  -> Waveform
+                          8x faster, better quality
+```
+
+### Key Innovations
+
+1. **Single-layer semantic token (n_q=1)**: The AR model predicts only 1 token/frame, 8x shorter sequences
+2. **VITS-based vocoder**: Higher quality than codec decoders, end-to-end waveform generation
+3. **Two-stage separation**: AR handles "what to say", vocoder handles "how to say it"
+4. **Zero-shot voice cloning**: 3-10 seconds of reference audio is enough, no fine-tuning required
+
+### Learning Roadmap
+
+| Section | Topic | Goal |
+|---------|-------|------|
+| 9.1 | System architecture overview | Understand the two-stage data flow |
+| 9.2 | Semantic tokens: why n_q=1 suffices | Semantic vs acoustic tokens |
+| 9.3 | AR model: GPT-style Transformer | Attention mask design |
+| 9.4 | SoVITS vocoder: VITS variant | TextEncoder, VAE + Flow + HiFi-GAN |
+| 9.5 | Two-stage training | Why separate training? |
+| 9.6 | Inference pipeline | End-to-end: text + reference -> waveform |
+| 9.7 | Code walkthrough | Implementation details |
+| 9.8 | Production comparison | Teaching version vs full GPT-SoVITS |
+| 9.9 | ONNX export | Deployment optimization |
+
+---
+
+## 9.1 System Architecture Overview
+
+### Inference Data Flow
+
+```
+  Reference Audio (3-10s, 16kHz)
         |
         v
-  [HuBERT / SSL Model]  ──→ SSL features (768-dim, 50Hz)
+  [HuBERT / SSL Model]  --> SSL features (768-dim, 50Hz)
         |                           |
         v                           v
-  [RVQ Quantizer]             (提取 prompt tokens)
+  [RVQ Quantizer]             (extract prompt tokens)
   n_q=1, bins=1024                  |
         |                           |
         v                           v
-  prompt_semantic_ids        ┌──────────────┐
-  (e.g. [42, 187, 3, ...])   │  AR Model    │ ← 文本 Phonemes
-                             │  (GPT-style) │
-                             └──────────────┘
+  prompt_semantic_ids        +--------------+
+  (e.g. [42, 187, 3, ...])   |  SimpleAR    | <-- Text Phonemes
+                             |  (GPT-style) |
+                             +--------------+
                                      |
                                      v
                              predicted_semantic_ids
                              (e.g. [42, 187, 3, 55, 201, ...])
                                      |
                                      v
-                        ┌────────────────────────┐
-                        │   SoVITS Vocoder        │ ← 文本 + 参考 Mel
-                        │   (VITS-based)          │
-                        │                         │
-                        │  TextEncoder → Prior    │
-                        │  Flow⁻¹ → z             │
-                        │  Generator → Waveform   │
-                        └────────────────────────┘
+                        +---------------------------+
+                        |   SoVITS Vocoder           | <-- Text + Ref Mel
+                        |   (VITS-based)             |
+                        |                            |
+                        |  TextEncoder -> Prior      |
+                        |  Flow^{-1} -> z            |
+                        |  Generator -> Waveform     |
+                        +---------------------------+
                                      |
                                      v
-                               输出波形 (32kHz)
+                               Output Waveform (32kHz)
 ```
 
-### 关键数据维度
+### Key Signal Dimensions
 
-| 信号 | 采样率 | 维度 | 说明 |
-|------|--------|------|------|
-| 文本 Phonemes | ~10-20 Hz | (T_text,) | 离散 ID, vocab=512 |
-| SSL Features | 50 Hz | (768, T_ssl) | HuBERT 输出 |
-| Semantic Tokens | 50 Hz | (T_audio,) | 离散 ID, vocab=1025 (含 EOS) |
-| Linear Spec | 50 Hz | (1025, T_spec) | n_fft=2048 |
-| Mel Spectrogram | 50 Hz | (128, T_mel) | 用于参考编码器 |
-| 波形 | 32 kHz | (T_wav,) | 最终输出 |
+| Signal | Rate | Shape | Notes |
+|--------|------|-------|-------|
+| Text Phonemes | ~10-20 Hz | `(T_text,)` | Discrete IDs, vocab=512 |
+| SSL Features | 50 Hz | `(768, T_ssl)` | HuBERT output |
+| Semantic Tokens | 50 Hz | `(T_audio,)` | Discrete IDs, vocab=1025 (incl. EOS) |
+| Linear Spectrogram | 50 Hz | `(1025, T_spec)` | n_fft=2048 |
+| Mel Spectrogram | 50 Hz | `(128, T_mel)` | For reference encoder |
+| Waveform | 32 kHz | `(T_wav,)` | Final output |
 
-### 训练 vs 推理
+### Training vs Inference
 
 ```
-训练时:
-  Stage 1 (AR):  phoneme_ids + semantic_ids → 预测下一个 semantic_id
-  Stage 2 (SoVITS): phoneme_ids + spec + ref_mel → 重建波形 (VAE+Flow+GAN)
+Training:
+  Stage 1 (AR):    phoneme_ids + semantic_ids -> predict next semantic_id
+  Stage 2 (SoVITS): phoneme_ids + spec + ref_mel -> reconstruct waveform (VAE+Flow+GAN)
 
-推理时:
-  1. AR: phoneme_ids + prompt_tokens → 自回归生成 semantic_ids
-  2. SoVITS: phoneme_ids + speaker_emb → 采样 + 逆变换 + 生成波形
-  (PosteriorEncoder 和 Discriminator 仅在训练时使用)
+Inference:
+  1. AR:    phoneme_ids + prompt_tokens -> autoregressive semantic_ids
+  2. SoVITS: phoneme_ids + speaker_emb -> sample z + inverse flow + generate waveform
+  (PosteriorEncoder and Discriminator are only used during training)
 ```
 
 ---
 
-## 9.2 语义 Token：为什么 n_q=1 就够了？
+## 9.2 Semantic Tokens: Why n_q=1 Suffices
 
-### 9.2.1 多层 Codec Token 的问题
+### 9.2.1 The Problem with Multi-Layer Codec Tokens
 
-Ch06 中我们学了 EnCodec 等神经音频编解码器。它们用 **多层 RVQ** 将音频压缩成多层 Token：
+In Ch06 we learned about neural audio codecs like EnCodec. They use **multi-layer RVQ**
+to compress audio into stacked token sequences:
 
 ```
-音频波形
-    ↓ Encoder
-连续特征 (50Hz, 128-dim)
-    ↓ RVQ (n_q=8)
-8 层 Token:
-  Layer 0: [42, 187, 3, 55, ...]     ← 语义层（说了什么）
-  Layer 1: [12, 89, 201, 7, ...]     ← 声学细节层
-  Layer 2: [45, 123, 8, 99, ...]     ← 更细的细节
+Audio Waveform
+    |  Encoder
+    v
+Continuous Features (50Hz, 128-dim)
+    |  RVQ (n_q=8)
+    v
+8 Token Layers:
+  Layer 0: [42, 187, 3, 55, ...]     <-- Semantic layer (what is said)
+  Layer 1: [12, 89, 201, 7, ...]     <-- Acoustic detail layer
+  Layer 2: [45, 123, 8, 99, ...]     <-- Finer details
   ...
-  Layer 7: [1, 0, 3, 2, ...]         ← 最细的残余
+  Layer 7: [1, 0, 3, 2, ...]         <-- Finest residual
 ```
 
-层数越深，Token 承载的信息越"声学化"（音色、共振峰细节），越不"语义化"。
+Deeper layers carry increasingly "acoustic" information (timbre, formant details)
+and less "semantic" information.
 
-### 9.2.2 HuBERT + 单层量化
+### 9.2.2 HuBERT + Single-Layer Quantization
 
-GPT-SoVITS 不做完整的音频编解码。它只做一件事：
+GPT-SoVITS doesn't perform full audio encoding/decoding. It does one thing:
 
-> **用 HuBERT 提取语义特征，然后用单层 VQ 量化成离散 Token。**
-
-```
-音频 (16kHz)
-    ↓ HuBERT (冻结的 SSL 模型)
-SSL features (768-dim, 50Hz)    ← 语义-rich 的连续表示
-    ↓ RVQ (n_q=1, bins=1024)
-semantic_ids (50Hz)              ← 每帧 1 个整数 Token
-```
-
-**为什么 HuBERT 特征天然"语义化"？**
-
-HuBERT 的训练目标是 **masked prediction of phoneme clusters**。
-也就是说，HuBERT 被训练来理解"说了什么"，而不是"怎么说的"。
-
-所以 HuBERT 特征的第一层 VQ 量化就已经捕获了主要语义信息。
-
-### 9.2.3 音色怎么办？
-
-语义 Token 丢失了音色信息。但 GPT-SoVITS 有一个巧妙的解决方案：
+> **Extract semantic features with HuBERT, then quantize with a single VQ codebook.**
 
 ```
-                   语义 Token (丢失了音色)
+Audio (16kHz)
+    |  HuBERT (frozen SSL model)
+    v
+SSL features (768-dim, 50Hz)    <-- Semantically rich continuous representation
+    |  RVQ (n_q=1, bins=1024)
+    v
+semantic_ids (50Hz)              <-- 1 integer token per frame
+```
+
+**Why are HuBERT features naturally "semantic"?**
+
+HuBERT's training objective is **masked prediction of phoneme clusters**.
+It learns to understand *what is said*, not *how it's said*.
+So even the first VQ layer captures the primary semantic content.
+
+### 9.2.3 What About Timbre?
+
+Semantic tokens lose timbre information. GPT-SoVITS has an elegant solution:
+
+```
+                   Semantic Tokens (timbre lost)
                         |
                         v
-SoVITS 声码器 ← 参考音频的 Mel Spectrogram (包含音色)
+SoVITS Vocoder <-- Reference Audio Mel Spectrogram (timbre preserved)
 ```
 
-声码器同时接收：
-1. **语义 Token** → 知道"说了什么"
-2. **参考音频** → 知道"谁在说"（通过 ReferenceEncoder 提取 speaker embedding）
+The vocoder receives both:
+1. **Semantic tokens** -> knows "what is said"
+2. **Reference audio** -> knows "who says it" (via ReferenceEncoder -> speaker embedding)
 
-音色信息通过参考音频直接注入声码器，**不需要 AR 模型预测**。
+Timbre is injected directly into the vocoder -- the AR model never needs to predict it.
 
-### 9.2.4 n_q=1 的效率优势
+### 9.2.4 Efficiency Gains from n_q=1
 
-| 方案 | Token 率 | AR 序列长度 (1秒) | AR 预测目标 |
-|------|----------|-------------------|-------------|
-| VALL-E (EnCodec) | 50Hz × 8层 = 400 tokens/s | 400 | 8 层码本 |
-| **GPT-SoVITS** | **50Hz × 1层 = 50 tokens/s** | **50** | **1 层码本** |
+| Approach | Token Rate | AR Sequence (1 second) | AR Prediction Target |
+|----------|------------|----------------------|---------------------|
+| VALL-E (EnCodec) | 50Hz x 8 = 400 tok/s | 400 | 8 codebook layers |
+| **GPT-SoVITS** | **50Hz x 1 = 50 tok/s** | **50** | **1 codebook layer** |
 
-AR 序列长度缩短 **8 倍**，推理速度快 **8 倍**。
+AR sequence length reduced **8x**, inference speed improved **8x**.
 
-> **Neko 笔记**：这不是"免费午餐"。单层 Token 的代价是声码器需要更"聪明"，
-> 要从粗糙的语义 Token + 参考音频中恢复出高质量波形。
-> 这就是为什么 GPT-SoVITS 选择 VITS 而不是简单的 codec decoder。
+> **Note**: This isn't a "free lunch." The cost is that the vocoder must be
+> "smarter" -- it has to reconstruct high-quality waveform from coarse semantic
+> tokens + reference audio. That's why GPT-SoVITS uses VITS instead of a
+> simple codec decoder.
 
 ---
 
-## 9.3 AR 模型：GPT-style Transformer
+## 9.3 AR Model: GPT-style Transformer
 
-### 9.3.1 核心思想
+### 9.3.1 Core Idea
 
-AR 模型的任务极其简单：
+The AR model's task is identical in structure to language modeling:
 
-> **给定文本 phonemes 和已有的 semantic tokens，预测下一个 semantic token。**
-
-这和大语言模型完全一样的范式：
+> **Given text phonemes and existing semantic tokens, predict the next semantic token.**
 
 ```
-GPT:    "今天天气" → 预测 → "很好"
-AR:     phonemes + [42, 187, 3] → 预测 → 55
+GPT:    "The weather today" -> predict -> "is nice"
+AR:     phonemes + [42, 187, 3] -> predict -> 55
 ```
 
-### 9.3.2 架构设计
+### 9.3.2 Architecture
 
 ```
-  AR Model Architecture
+  SimpleAR Architecture
   ======================
 
   phoneme_ids (B, T_text)
-      ↓
-  Text Embedding (512 → 384)
-      ↓
+      |
+  Text Embedding (vocab=512 -> dim=384)
+      |
   + Sine Positional Encoding
       |
       |  concat
       v
   [text_emb | audio_emb]  (B, T_text + T_audio, 384)
-      ↓
-  8 × CausalTransformerBlock
-  (causal self-attention, 8 heads, 4× FFN)
-      ↓
+      |
+  8 x CausalTransformerBlock
+  (causal self-attention, 8 heads, 4x FFN)
+      |
   LayerNorm
-      ↓
-  取 audio 部分 (positions T_text:)
-      ↓
-  Linear(384, 1025, bias=False)  ← 预测层
-      ↓
+      |
+  Extract audio portion (positions T_text:)
+      |
+  Linear(384, 1025, bias=False)  <-- prediction layer
+      |
   logits (B, T_audio, 1025)
 ```
 
-### 9.3.3 注意力掩码设计
+### 9.3.3 Attention Mask Design
 
-GPT-SoVITS 的注意力掩码是其最精妙的设计之一。
+The attention mask in GPT-SoVITS is one of its most elegant design choices.
 
-在原始实现中，拼接的 [text | audio] 序列使用混合掩码：
+**Original implementation** uses a hybrid mask over the concatenated `[text | audio]` sequence:
 
 ```
-  Attention Mask Layout (original):
+  Attention Mask Layout (original GPT-SoVITS):
 
              text    audio
-  text   [ bidirectional  |   masked   ]   ← text 可以互相看
-         [                |            ]      text 不能看 audio
-  audio  [ all-to-text    |   causal   ]   ← audio 看所有 text
-         [                |  (upper    ]      audio 只能看过去的 audio
+  text   [ bidirectional  |   masked   ]   <- text attends to all text
+         [                |            ]      text does NOT see audio
+  audio  [ all-to-text    |   causal   ]   <- audio sees all text
+         [                |  (upper    ]      audio sees only past audio
                             triangular)
 ```
 
-**为什么这样设计？**
+**Why this design?**
 
-1. **Text 双向注意力**：phonemes 之间没有因果关系，互相看能得到更好的文本表示
-2. **Audio 因果注意力**：每个 semantic token 只能依赖过去的 token（自回归约束）
-3. **Audio→Text 全注意力**：每个 audio token 可以看到完整的文本（知道要说什么）
-4. **Text 不看 Audio**：文本表示不需要知道音频（训练时避免泄露）
+1. **Text bidirectional**: Phonemes have no causal relationship; mutual attention gives better text representations
+2. **Audio causal**: Each semantic token can only depend on past tokens (autoregressive constraint)
+3. **Audio->Text full attention**: Each audio token sees the complete text (knows what to say)
+4. **Text ignores Audio**: Text representations don't need audio (prevents information leakage)
 
-> 我们的简化实现使用纯因果掩码 (causal attention for all)，
-> 效果类似但实现更简单。text 部分虽然也是因果的，但因为 text 很短，
-> 双向 vs 因果的差异不大。
+> Our **simplified implementation** uses pure causal attention for the entire sequence.
+> Since text is short, the bidirectional-vs-causal difference is minor, and the
+> implementation is much cleaner.
 
-### 9.3.4 超参数
+### 9.3.4 Hyperparameter Comparison
 
-| 参数 | 原始 GPT-SoVITS | 简化版 (本章) | 变化 |
-|------|-----------------|--------------|------|
+| Parameter | Original GPT-SoVITS | Teaching Version (ours) | Change |
+|-----------|---------------------|------------------------|--------|
 | hidden_dim | 512 | 384 | -25% |
 | num_layers | 12-24 | 8 | -33% |
 | num_heads | 16 | 8 | -50% |
-| vocab_size | 1025 | 1025 | 不变 |
-| phoneme_vocab | 512-732 | 512 | 不变 |
-| BERT features | 1024-dim | 不使用 | 简化 |
-| 参数量 | ~40M | ~15M | -62% |
+| vocab_size | 1025 | 1025 | same |
+| phoneme_vocab | 512-732 | 512 | same |
+| BERT features | 1024-dim RoBERTa | Not used | simplified |
+| Parameters | ~40M | ~15.2M | -62% |
 
-### 9.3.5 推理：自回归生成 + Top-k 采样
+### 9.3.5 Inference: Autoregressive Generation with Top-k Sampling
 
 ```python
-# 伪代码：AR 推理
+# Pseudocode: AR inference
 def generate(phoneme_ids, prompt_tokens, max_tokens=500):
     current = prompt_tokens.clone()
 
     for step in range(max_tokens):
         logits = ar_model(phoneme_ids, current)   # (1, T, 1025)
-        next_logits = logits[:, -1, :]             # 最后一个位置
+        next_logits = logits[:, -1, :]             # last position
 
-        # Top-k 过滤
+        # Top-k filtering
         top_values = topk(next_logits, k=5)
         next_logits[next_logits < top_values[-1]] = -inf
 
-        # 采样
+        # Sampling
         probs = softmax(next_logits / temperature)
         next_token = multinomial(probs)
 
         current = concat(current, next_token)
 
-        if next_token == EOS:  # 1024
+        if next_token == EOS:  # token 1024
             break
 
-    return current[len(prompt_tokens):]  # 去掉 prompt
+    return current[len(prompt_tokens):]  # strip prompt
 ```
 
-### 9.3.6 KV-Cache 加速（原始实现）
+### 9.3.6 KV-Cache Acceleration (Production Only)
 
-在原始 GPT-SoVITS 中，推理使用了 **KV-Cache** 优化：
+The production GPT-SoVITS uses **KV-Cache** for efficient inference:
 
 ```
-不用 KV-Cache:
-  step 1: process [text, token_0]                    → predict token_1
-  step 2: process [text, token_0, token_1]            → predict token_2
-  step 3: process [text, token_0, token_1, token_2]   → predict token_3
-  ...
-  复杂度: O(T^2) 每步，O(T^3) 总计
+Without KV-Cache:
+  step 1: process [text, token_0]                    -> predict token_1
+  step 2: process [text, token_0, token_1]            -> predict token_2
+  step 3: process [text, token_0, token_1, token_2]   -> predict token_3
+  Complexity: O(T^2) per step, O(T^3) total
 
-用 KV-Cache:
-  step 0: process [text, prompt_tokens]  → 缓存 K,V
-  step 1: process [token_new] + 缓存 K,V → predict, 更新缓存
-  step 2: process [token_new] + 缓存 K,V → predict, 更新缓存
-  ...
-  复杂度: O(T) 每步，O(T^2) 总计
+With KV-Cache:
+  step 0: process [text, prompt_tokens]  -> cache K,V
+  step 1: process [new_token] + cached K,V -> predict, update cache
+  step 2: process [new_token] + cached K,V -> predict, update cache
+  Complexity: O(T) per step, O(T^2) total
 ```
 
-我们的简化实现不使用 KV-Cache（更易于理解），但代价是推理较慢。
+Our teaching version omits KV-Cache for clarity (at the cost of slower inference).
 
 ---
 
-## 9.4 SoVITS 声码器：VITS 变体
+## 9.4 SoVITS Vocoder: VITS Variant
 
-SoVITS 是一个修改版的 VITS，核心区别是：
-- **没有 DurationPredictor**（AR 模型隐式处理时长）
-- **语义 Token 作为输入**（而不是纯 phonemes）
-- **ReferenceEncoder 提取 speaker embedding**（用于零样本克隆）
+SoVITS is a modified VITS with three key differences:
+- **No DurationPredictor** (the AR model implicitly handles duration)
+- **Semantic tokens as input** (instead of raw phonemes only)
+- **ReferenceEncoder** for speaker embedding (enables zero-shot cloning)
 
-### 9.4.1 整体架构
+### 9.4.1 Overall Architecture
 
 ```
   SoVITS Vocoder Architecture (Training)
   ========================================
 
-  phoneme_ids ──→ TextEncoder ──→ (μ_p, logσ_p)  先验分布
-       ↑                              |
-  speaker_emb ────────────────────────┘  (speaker conditioning)
-       ↑                                | KL 散度
-  ref_mel ──→ ReferenceEncoder ──→ speaker_emb
-                                        ↓
-  spec ──→ PosteriorEncoder ──→ (μ_q, logσ_q)  后验分布
+  phoneme_ids --> TextEncoder --> (mu_p, log_sigma_p)   Prior distribution
+       ^                              |
+  speaker_emb ------------------------+  (speaker conditioning)
+       ^                                | KL divergence
+  ref_mel --> ReferenceEncoder --> speaker_emb
                                         |
-                                  z_q = μ_q + ε·σ_q  (重参数化)
+  spec ------> PosteriorEncoder --> (mu_q, log_sigma_q)  Posterior distribution
                                         |
-                                  Flow(z_q) → z_p  (归一化流)
+                                  z_q = mu_q + eps * sigma_q  (reparameterization)
                                         |
-                                  Generator(z_q) → ŷ  (HiFi-GAN)
+                                  Flow(z_q) -> z_p  (normalizing flow)
                                         |
-                                  Discriminator(y, ŷ)  (对抗训练)
+                                  Generator(z_q) -> y_hat  (HiFi-GAN)
+                                        |
+                                  Discriminator(y, y_hat)  (adversarial training)
 ```
 
-### 9.4.2 TextEncoder（简化版，无 MRTE）
+### 9.4.2 TextEncoder (Simplified, No MRTE)
 
-原始 GPT-SoVITS 的 TextEncoder 有三个子编码器：
-
-```
-原始:
-  SSL features → SSL Encoder (3层) → content
-  phonemes → Text Encoder (6层) → text
-  ref_audio → Reference Encoder → speaker_emb (ge)
-
-  MRTE: content × text (cross-attn) + ge → fused
-  Final Encoder (3层) → (μ_p, logσ_p)
-```
-
-MRTE (Multi-Reference Timbre Encoder) 是原始系统最复杂的组件，
-通过 cross-attention 将语义内容、文本信息和说话人特征融合在一起。
-
-我们的简化版本将这三个子编码器合并为一个：
+The original GPT-SoVITS TextEncoder has three sub-encoders:
 
 ```
-简化:
-  phonemes → Embedding → + speaker_proj(speaker_emb)
-                        ↓
-                  6层 Transformer Encoder
-                        ↓
-                  Linear → (μ_p, logσ_p)
+Original (production):
+  SSL features -> SSL Encoder (3 layers) -> content
+  phonemes     -> Text Encoder (6 layers) -> text
+  ref_audio    -> Reference Encoder       -> speaker_emb (ge)
+
+  MRTE (Multi-Reference Timbre Encoder):
+    content x text (cross-attention) + ge -> fused
+  Final Encoder (3 layers) -> (mu_p, log_sigma_p)
 ```
 
-### 9.4.3 PosteriorEncoder（WaveNet 膨胀卷积）
+**MRTE** is the most sophisticated component -- it uses cross-attention to align
+acoustic content with linguistic text, while the speaker embedding injects timbre
+additively. This is the core mechanism for zero-shot voice cloning.
+
+Our simplified version merges all three sub-encoders into one:
+
+```
+Simplified (teaching):
+  phonemes -> Embedding -> + speaker_proj(speaker_emb)
+                        |
+                  6-layer Transformer Encoder
+                        |
+                  Linear -> (mu_p, log_sigma_p)
+```
+
+### 9.4.3 PosteriorEncoder (WaveNet Dilated Convolutions)
 
 ```
   Linear Spectrogram (B, 1025, T)
-      ↓ Conv1d(1025, 192)
-      ↓ 8× WaveNet Block (dilation: 1,2,4,8,1,2,4,8)
-      ↓   每层: Conv1d(192, 384) → split → tanh × sigmoid
-      ↓ Conv1d(192, 384) → (μ_q, logσ_q)
-      ↓ 重参数化: z_q = μ_q + ε·σ_q
+      |  Conv1d(1025, 192)
+      |  8x WaveNet Block (dilations: 1,2,4,8,1,2,4,8)
+      |    each: Conv1d(192, 384) -> split -> tanh x sigmoid
+      |  Conv1d(192, 384) -> (mu_q, log_sigma_q)
+      |  Reparameterize: z_q = mu_q + eps * sigma_q
   z_q (B, 192, T)
 ```
 
-仅在训练时使用。推理时从先验分布采样。
+Only used during training. At inference time, we sample from the prior.
 
-### 9.4.4 Flow（归一化流）
+### 9.4.4 Flow (Normalizing Flow, Affine Coupling)
 
 ```
-  2 × (AffineCouplingLayer + Flip)
+  2 x (AffineCouplingLayer + Flip)
 
-  每个 AffineCouplingLayer:
-    x = [x1, x2]  (通道对半切)
+  Each AffineCouplingLayer:
+    x = [x1, x2]  (channel split)
     s, t = WaveNet(x1)
-    z2 = (x2 - t) × exp(-s)
+    z2 = (x2 - t) * exp(-s)
     z = [x1, z2]
 ```
 
-训练：z_q → z_p (后验 → 先验空间)
-推理：z_p → z_q (先验采样 → 解码器空间)
+Training: z_q -> z_p (posterior -> prior space)
+Inference: z_p -> z_q (prior sample -> decoder space)
 
-### 9.4.5 Generator（HiFi-GAN）
+### 9.4.5 Generator (HiFi-GAN)
 
 ```
   z (B, 192, T)
-      ↓ Conv1d(192, 256, k=7)
-      ↓ 5 × [ConvTranspose1d (上采样) + 3× ResBlock1]
-      |   upsample_rates: [10, 8, 2, 2, 2]
-      |   总上采样: 10×8×2×2×2 = 640
-      ↓ Conv1d → tanh
-  waveform (B, 1, T×640)
+      |  Conv1d(192, 256, k=7)
+      |  5 x [ConvTranspose1d (upsample) + 3x ResBlock1]
+      |    upsample_rates: [10, 8, 2, 2, 2]
+      |    total upsampling: 10 x 8 x 2 x 2 x 2 = 640
+      |  Conv1d -> tanh
+  waveform (B, 1, T*640)
 ```
 
 ### 9.4.6 ReferenceEncoder
 
 ```
   ref_mel (B, 128, T)
-      ↓ 4× Conv2d (stride=2, 逐步下采样)
-      ↓ Reshape (B, T', C×F)
-      ↓ Linear → GRU → Linear
+      |  4x Conv2d (stride=2, progressive downsampling)
+      |  Reshape (B, T', C*F)
+      |  Linear -> GRU -> Linear
   speaker_emb (B, 256)
 ```
 
-### 9.4.7 Discriminator（MPD）
+### 9.4.7 Discriminator (Multi-Period Discriminator)
 
 ```
-  Multi-Period Discriminator
+  Multi-Period Discriminator (MPD)
   periods = [2, 3, 5, 7, 11]
 
-  每个子判别器:
-    waveform (1D) → reshape 为 2D (period × subseq)
-    → 4× Conv2d → LeakyReLU
-    → Conv2d → 真/假
+  Each sub-discriminator:
+    waveform (1D) -> reshape to 2D (period x subsequence)
+    -> 4x Conv2d -> LeakyReLU
+    -> Conv2d -> real/fake decision
 ```
+
+Each sub-discriminator sees different periodic structures in the waveform
+(prime-numbered periods ensure no overlap in the periodicities captured).
 
 ---
 
-## 9.5 两阶段训练
+## 9.5 Two-Stage Training
 
-### 9.5.1 为什么要分两阶段？
+### 9.5.1 Why Two Stages?
 
-GPT-SoVITS 的两个模型解决完全不同的问题：
+The two models solve fundamentally different problems:
 
 | | AR Model | SoVITS Vocoder |
-|---|---------|---------------|
-| **输入** | 文本 + 历史 Token | 文本 + 参考音频 |
-| **输出** | 语义 Token | 波形 |
-| **损失函数** | CrossEntropy | GAN (mel + KL + adv + feat) |
-| **训练方式** | 标准自回归 | GAN 对抗训练 |
-| **帧率** | 50 Hz | 50 Hz → 32 kHz |
+|---|----------|---------------|
+| **Input** | Text + history tokens | Text + reference audio |
+| **Output** | Semantic tokens | Waveform |
+| **Loss** | CrossEntropy | GAN (mel + KL + adversarial + feature) |
+| **Training** | Standard autoregressive | GAN adversarial training |
+| **Frame rate** | 50 Hz | 50 Hz -> 32 kHz |
 
-混合训练不仅复杂，而且两个阶段的梯度会互相干扰。
+Joint training would be complex and the two stages' gradients would interfere.
 
-### 9.5.2 Stage 1: AR 模型训练
+### 9.5.2 Stage 1: AR Model Training
 
 ```
-  Stage 1 训练流程
-  =================
+  Stage 1 Training Pipeline
+  ==========================
 
-  数据准备:
-    1. HuBERT 提取所有音频的 SSL features
-    2. RVQ 量化 → semantic_ids (每段音频的"语义标签")
-    3. G2P 转换文本 → phoneme_ids
+  Data Preparation:
+    1. Extract HuBERT SSL features for all audio
+    2. RVQ quantization -> semantic_ids ("semantic labels" for each clip)
+    3. G2P conversion: text -> phoneme_ids
 
-  训练循环:
+  Training Loop:
     Input:  phoneme_ids + semantic_ids[:-1]  (teacher forcing)
-    Target: semantic_ids[1:]                  (右移 1 位)
+    Target: semantic_ids[1:]                  (right-shifted by 1)
 
-    Loss = CrossEntropy(logits, targets)
+    Loss = CrossEntropy(logits, targets, reduction="sum")
 
-  优化器: AdamW (简化版, 原系统用 ScaledAdam)
+  Optimizer: AdamW (simplified; original uses ScaledAdam from k2)
     - betas: (0.9, 0.95)
-    - warmup: 200 steps
-    - cosine decay
+    - warmup: 2000 steps
+    - cosine decay to 0.0001
     - gradient clipping: 1.0
+
+  ScaledAdam (production):
+    - Parameter-aware learning rate scaling
+    - Peak LR: 0.01, init LR: 0.00001
+    - Warmup: 2000 steps, total decay: 40000 steps
+
+  Gradient Accumulation:
+    - Batch size: 8 (per GPU)
+    - Accumulation steps: 4
+    - Effective batch size: 32
+    - This allows training on GPUs with limited memory while maintaining
+      stable gradient estimates
 ```
 
-**训练目标**：给定文本和已知的语义 Token 前缀，正确预测下一个 Token。
-
-### 9.5.3 Stage 2: SoVITS 声码器训练
+### 9.5.3 Stage 2: SoVITS Vocoder Training
 
 ```
-  Stage 2 训练流程 (GAN 训练)
-  =============================
+  Stage 2 Training Pipeline (GAN Training)
+  ==========================================
 
-  每个 batch:
+  Each batch:
     1. Generator forward:
-       ref_mel → ReferenceEncoder → speaker_emb
-       phonemes + speaker_emb → TextEncoder → (μ_p, logσ_p)
-       spec → PosteriorEncoder → z_q, (μ_q, logσ_q)
-       Flow(z_q) → z_p  (后验→先验)
-       Generator(z_q) → ŷ  (生成波形)
+       ref_mel -> ReferenceEncoder -> speaker_emb
+       phonemes + speaker_emb -> TextEncoder -> (mu_p, log_sigma_p)
+       spec -> PosteriorEncoder -> z_q, (mu_q, log_sigma_q)
+       Flow(z_q) -> z_p  (posterior -> prior)
+       Generator(z_q) -> y_hat  (synthesize waveform)
 
     2. Discriminator step:
        L_D = MSE(D(real), 1) + MSE(D(fake.detach()), 0)
 
     3. Generator step:
-       L_G = gen_loss + feat_loss + 45×mel_loss + 1×kl_loss
-       gen_loss  = MSE(D(fake), 1)
-       feat_loss = Σ |f_real - f_fake|  (特征匹配)
-       mel_loss  = L1(mel(fake), mel(real))
-       kl_loss   = KL(q || p)
+       L_G = gen_loss + feat_loss + 45*mel_loss + 1*kl_loss
 
-  优化器: AdamW × 2 (G 和 D 各一个)
+  Optimizer: AdamW x 2 (one for G, one for D)
     - betas: (0.8, 0.99)
     - lr: 1e-4
+    - Exponential decay: 0.999875 per epoch
+
+  Differential Learning Rates (production):
+    - Text embedding, encoder_text, MRTE: lr * 0.4  (slower updates)
+    - All other parameters: lr  (base rate)
+    - Rationale: text-related parameters converge faster and need
+      smaller updates to avoid catastrophic forgetting
 ```
 
-### 9.5.4 损失函数权重
+### 9.5.4 Loss Function Weights
 
 ```
-L_gen = L_adv_G + L_feat + 45 × L_mel + 1 × L_KL
+L_gen = L_adv_G + L_feat + 45 * L_mel + 1 * L_KL
 ```
 
-| 损失 | 权重 | 含义 |
-|------|------|------|
-| L_mel | 45 | Mel 频谱重建（最重要） |
-| L_KL | 1 | KL 散度正则化 |
-| L_adv_G | 1 | 对抗损失（提升自然度） |
-| L_feat | 1 | 特征匹配（稳定训练） |
+| Loss | Weight | Meaning |
+|------|--------|---------|
+| L_mel | 45 | Mel-spectrogram reconstruction (most important) |
+| L_KL | 1 | KL divergence regularization (prior-posterior match) |
+| L_adv_G | 1 | Adversarial loss (improves naturalness) |
+| L_feat | 1 | Feature matching (stabilizes training) |
 
 ---
 
-## 9.6 推理流程
+## 9.6 Inference Pipeline
 
-### 9.6.1 完整推理步骤
+### 9.6.1 Complete Inference Steps
 
 ```python
-# 伪代码：GPT-SoVITS 推理
+# Pseudocode: GPT-SoVITS inference
 
 def synthesize(text, ref_audio_path):
-    # 1. 预处理
-    phoneme_ids = g2p(text)               # 文本 → phoneme IDs
-    ref_wav = load_audio(ref_audio_path)   # 加载参考音频
+    # 1. Preprocessing
+    phoneme_ids = g2p(text)               # text -> phoneme IDs
+    ref_wav = load_audio(ref_audio_path)   # load reference audio
 
-    # 2. 提取参考特征
+    # 2. Extract reference features
     ref_mel = mel_spectrogram(ref_wav)
-    speaker_emb = ref_encoder(ref_mel)     # 说话人嵌入
+    speaker_emb = ref_encoder(ref_mel)     # speaker embedding
 
-    # 3. 提取 prompt tokens
-    ssl_feat = hubert(ref_wav)             # HuBERT 特征
-    prompt_tokens = rvq.encode(ssl_feat)   # 量化为 semantic IDs
+    # 3. Extract prompt tokens
+    ssl_feat = hubert(ref_wav)             # HuBERT features
+    prompt_tokens = rvq.encode(ssl_feat)   # quantize to semantic IDs
 
-    # 4. AR 生成
+    # 4. AR generation
     generated_tokens = ar_model.generate(
         phoneme_ids, prompt_tokens,
         top_k=5, temperature=1.0,
     )
 
-    # 5. SoVITS 声码器
-    all_tokens = concat(prompt_tokens, generated_tokens)
+    # 5. SoVITS vocoder
     m_p, logs_p = text_encoder(phoneme_ids, speaker_emb)
-    z_p = m_p + randn × exp(logs_p) × 0.667   # 从先验采样
-    z = flow.inverse(z_p)                       # 逆变换
-    waveform = generator(z)                     # 生成波形
+    z_p = m_p + randn * exp(logs_p) * 0.667   # sample from prior
+    z = flow.inverse(z_p)                       # inverse transform
+    waveform = generator(z)                     # generate waveform
 
     return waveform
 ```
 
-### 9.6.2 关键推理参数
+### 9.6.2 Key Inference Parameters
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| top_k | 5 | AR 采样宽度。越小越确定，越大越多样 |
-| temperature | 1.0 | 采样温度。>1 更随机，<1 更保守 |
-| noise_scale | 0.667 | VAE 采样噪声。控制生成波形的变化度 |
-| max_tokens | 500 | 最大生成 Token 数 (50Hz × 10s) |
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| top_k | 5 | AR sampling width. Lower = more deterministic, higher = more diverse |
+| temperature | 1.0 | Sampling temperature. >1 = more random, <1 = more conservative |
+| noise_scale | 0.667 | VAE sampling noise. Controls variation in generated waveform |
+| max_tokens | 500 | Max generated tokens (50Hz x 10s) |
+| repetition_penalty | 1.35 | Penalizes repeated tokens (production only) |
 
-### 9.6.3 RTF (Real-Time Factor)
+### 9.6.3 Real-Time Factor (RTF)
 
 ```
-RTF = 生成时间 / 音频时长
+RTF = generation_time / audio_duration
 
-RTF < 1:  比实时快（理想目标）
-RTF = 1:  实时
-RTF > 1:  比实时慢
+RTF < 1:  Faster than real-time (ideal goal)
+RTF = 1:  Real-time
+RTF > 1:  Slower than real-time
 ```
 
-GPT-SoVITS 的 RTF 主要取决于 AR 模型（自回归是瓶颈）：
+GPT-SoVITS RTF is dominated by the AR model (autoregressive is the bottleneck):
 
-| 组件 | 时间占比 | 优化方向 |
-|------|----------|----------|
-| AR 自回归 | ~80% | KV-Cache, 并行解码 |
-| SoVITS 声码器 | ~20% | 单次前向传播，已经很快 |
+| Component | Time Share | Optimization |
+|-----------|-----------|-------------|
+| AR autoregressive | ~80% | KV-Cache, parallel decoding |
+| SoVITS vocoder | ~20% | Single forward pass, already fast |
 
 ---
 
-## 9.7 代码走读
+## 9.7 Code Walkthrough
 
-### 9.7.1 文件结构
+### 9.7.1 File Structure
 
 ```
 ch09_gpt_sovits/
-├── README.md              # 本章教程（你在这里）
-├── code/
-│   ├── model.py           # 所有模型组件 + 损失函数
-│   ├── train.py           # 两阶段训练脚本
-│   ├── inference.py       # 端到端推理
-│   └── export_onnx.py     # ONNX 导出
-├── checkpoints/           # 训练保存的模型权重
-├── outputs/               # 生成的音频
-└── onnx_models/           # 导出的 ONNX 模型
+|-- README.md              # This tutorial
+|-- code/
+|   |-- model.py           # All model components + loss functions (1281 lines)
+|   |-- train.py           # Two-stage training script
+|   |-- inference.py       # End-to-end inference
+|   +-- export_onnx.py     # ONNX export
+|-- checkpoints/           # Saved model weights
+|-- outputs/               # Generated audio
++-- onnx_models/           # Exported ONNX models
 ```
 
-### 9.7.2 model.py 核心类
+### 9.7.2 model.py Core Classes
 
 ```python
-# --- AR 模型 ---
+# --- Stage 1: AR Model ---
 class SimpleAR:
-    """384-dim, 8-layer, 8-head Transformer decoder"""
+    """384-dim, 8-layer, 8-head Transformer decoder (~15.2M params)"""
     def forward(phoneme_ids, semantic_ids) -> logits
     def generate(phoneme_ids, prompt, top_k, temperature) -> tokens
 
-# --- RVQ 量化器 ---
+# --- RVQ Quantizer ---
 class SimpleRVQ:
-    """单码本量化器 (n_q=1, bins=1024, dim=768)"""
+    """Single-codebook quantizer (n_q=1, bins=1024, dim=768) (~0.8M params)"""
     def encode(ssl_features) -> token_ids
     def decode(token_ids) -> quantised_features
 
-# --- SoVITS 声码器组件 ---
-class SoVITSTextEncoder:       # 文本 → (μ_p, logσ_p)
-class PosteriorEncoder:        # 频谱 → z_q (仅训练)
-class Flow:                    # 可逆变换 z_q ↔ z_p
-class Generator:               # z → 波形 (HiFi-GAN)
-class ReferenceEncoder:        # 参考 Mel → speaker_emb
-class Discriminator:           # MPD 判别器 (仅训练)
+# --- Stage 2: SoVITS Vocoder Components ---
+class SoVITSTextEncoder:       # text -> (mu_p, log_sigma_p)     (~2.9M)
+class PosteriorEncoder:        # spectrogram -> z_q (train only) (~3.2M)
+class Flow:                    # invertible transform z_q <-> z_p (~1.3M)
+class Generator:               # z -> waveform (HiFi-GAN)        (~3.8M)
+class ReferenceEncoder:        # ref_mel -> speaker_emb          (~0.3M)
+class Discriminator:           # MPD discriminator (train only)  (~4.2M)
 
-# --- 完整模型 ---
+# --- Combined Model ---
 class GPTSoVITS:
-    """包装器: AR + RVQ + SoVITS"""
+    """Wrapper: AR + RVQ + SoVITS (~31.6M total)"""
     def forward_stage1(phoneme_ids, semantic_ids) -> logits
     def forward_stage2(phoneme_ids, spec, ref_mel) -> waveform, stats
 ```
 
-### 9.7.3 训练脚本
+### 9.7.3 Quick Start: Shape Verification
+
+Run the built-in shape tests to verify all components:
 
 ```bash
-# Stage 1: AR 模型
-python train.py --stage 1 --epochs 10 --batch-size 4 --lr 1e-4
-
-# Stage 2: SoVITS 声码器
-python train.py --stage 2 --epochs 10 --batch-size 4 --lr 1e-4
+cd chapters/ch09_gpt_sovits/code
+python model.py
 ```
 
-### 9.7.4 推理脚本
-
-```bash
-# 基本推理
-python inference.py --text "hello world" --output output.wav
-
-# 使用训练好的模型 + 参考音频
-python inference.py \
-    --ar-checkpoint ../checkpoints/ar_model.pt \
-    --sovits-checkpoint ../checkpoints/sovits_model.pt \
-    --ref-audio reference.wav \
-    --text "你好世界" \
-    --output clone.wav
-
-# 性能基准测试
-python inference.py --text "hello world" --output output.wav --benchmark
-```
-
-### 9.7.5 参数量统计
-
-运行 `python model.py` 查看：
+Expected output:
 
 ```
-SimpleAR:           15.2M
-SimpleRVQ:           0.8M  (frozen)
-SoVITSTextEncoder:   2.9M
-PosteriorEncoder:    3.2M
-Flow:                1.3M
-Generator:           3.8M
-ReferenceEncoder:    0.3M
-Discriminator:       4.2M  (仅训练)
-─────────────────────────
-Total:              31.6M
-Trainable:          30.8M
+============================================================
+GPT-SoVITS Shape Verification Tests
+============================================================
+
+--- SimpleAR ---
+  phoneme_ids:  torch.Size([2, 10])
+  semantic_ids: torch.Size([2, 50])
+  logits:       torch.Size([2, 50, 1025])
+  params: 15,2xx,xxx (15.2M)
+
+--- SimpleRVQ ---
+  ssl_feat:  torch.Size([2, 768, 50])
+  ids:       torch.Size([2, 50])
+  decoded:   torch.Size([2, 768, 50])
+  params: 786,432 (0.8M)
+
+--- GPTSoVITS (full model) ---
+  Stage 1 logits: torch.Size([2, 50, 1025])
+  Stage 2 waveform: torch.Size([2, 1, 32000])
+  Total params:     31,6xx,xxx (31.6M)
+  Trainable params: 30,8xx,xxx (30.8M)
+
+============================================================
+All shape verification tests passed!
+============================================================
 ```
+
+### 9.7.4 Code Example: AR Generation
+
+```python
+from model import SimpleAR
+
+# Create AR model
+ar = SimpleAR(dim=384, n_heads=8, n_layers=8)
+
+# Prepare inputs
+phoneme_ids = torch.randint(0, 512, (1, 15))   # 15 phoneme tokens
+prompt_tokens = torch.randint(0, 1024, (1, 25)) # 0.5s of reference audio
+
+# Generate semantic tokens
+generated = ar.generate(
+    phoneme_ids, prompt_tokens,
+    max_new_tokens=100,  # up to 2 seconds
+    top_k=5,
+    temperature=1.0,
+)
+print(f"Generated {generated.shape[1]} semantic tokens")
+```
+
+### 9.7.5 Code Example: Full Pipeline
+
+```python
+from model import GPTSoVITS
+
+model = GPTSoVITS()
+
+# Stage 1: AR training step
+logits = model.forward_stage1(phoneme_ids, semantic_ids)
+loss = F.cross_entropy(logits.reshape(-1, 1025), semantic_ids.reshape(-1))
+
+# Stage 2: Vocoder training step
+y_hat, m_p, logs_p, m_q, logs_q = model.forward_stage2(
+    phoneme_ids, spectrogram, ref_mel
+)
+kl = kl_loss(m_p, logs_p, m_q, logs_q)
+```
+
+### 9.7.6 Parameter Breakdown
+
+| Component | Parameters | Role |
+|-----------|-----------|------|
+| SimpleAR | ~15.2M | Phonemes -> semantic tokens |
+| SimpleRVQ | ~0.8M (frozen) | SSL features -> discrete IDs |
+| SoVITSTextEncoder | ~2.9M | Text -> prior distribution |
+| PosteriorEncoder | ~3.2M | Spectrogram -> posterior (train only) |
+| Flow | ~1.3M | Invertible z transform |
+| Generator | ~3.8M | Latent -> waveform (HiFi-GAN) |
+| ReferenceEncoder | ~0.3M | Reference mel -> speaker embedding |
+| Discriminator | ~4.2M (train only) | Adversarial training |
+| **Total** | **~31.6M** | |
+| **Trainable** | **~30.8M** | (RVQ is frozen) |
 
 ---
 
-## 9.8 与 VALL-E 的对比
+## 9.8 Teaching Version vs Production GPT-SoVITS
 
-### 9.8.1 架构对比
-
-| 特性 | VALL-E (Ch07) | GPT-SoVITS (本章) |
-|------|---------------|-------------------|
-| 音频 Token 来源 | EnCodec (训练好的 codec) | HuBERT + RVQ (SSL 特征) |
-| Token 层数 | 8 层 | 1 层 |
-| Token 率 | 400 tokens/s | 50 tokens/s |
-| AR 模型 | 预测 Layer-0 | 预测唯一层 |
-| 第二模型 | NAR (并行预测 Layer 1-7) | SoVITS 声码器 (VITS) |
-| 最终波形生成 | Codec Decoder | HiFi-GAN Generator |
-| 训练数据需求 | 60,000+ 小时 | 3-10 分钟 fine-tune |
-| 推理速度 | 较慢 (8× 序列) | 较快 (1× 序列) |
-
-### 9.8.2 设计哲学对比
+### 9.8.1 Scale Comparison
 
 ```
-VALL-E 哲学:
-  "让一个强大的 codec 处理一切，AR 模型学习 codec 的语言"
-  → 通用但慢，codec 是黑箱
+  Production GPT-SoVITS (~70M)
+  ============================
 
-GPT-SoVITS 哲学:
-  "用 SSL 特征捕获语义，用 VITS 声码器恢复波形"
-  → 更快，声码器能利用参考音频的音色信息
+  AR Model (~40M):
+    dim=512, layers=12, heads=16
+    BERT features (1024-dim)
+    KV-Cache inference
+    DPO loss (optional)
+
+  SoVITS (~30M):
+    hidden_channels=192, filter_channels=768
+    PosteriorEncoder: 16 layers
+    Flow: 4 coupling layers
+    Generator: upsample_initial=512
+    MRTE (full cross-attention)
+
+  External (frozen, not counted):
+    HuBERT-base: ~95M
+    RoBERTa-large: ~330M
+
+
+  Teaching Version (~31.6M)
+  ==========================
+
+  SimpleAR (~15.2M):
+    dim=384, layers=8, heads=8
+    No BERT (learned positional only)
+    Naive autoregressive inference
+    CE loss only
+
+  SoVITS (~16.4M):
+    hidden_channels=192, filter_channels=768
+    PosteriorEncoder: 8 layers
+    Flow: 2 coupling layers
+    Generator: upsample_initial=256
+    Simplified TextEncoder (no MRTE)
+
+  External:
+    HuBERT: ~95M (still needed)
+    BERT: Not used
 ```
 
-### 9.8.3 质量对比
+### 9.8.2 Detailed Comparison Table
 
-在零样本场景下（3 秒参考音频）：
+| Component | Production | Teaching | Rationale |
+|-----------|-----------|----------|-----------|
+| **AR dim** | 512 | 384 | -25% width, saves ~10M params |
+| **AR layers** | 12-24 | 8 | Fewer layers, still captures long-range deps |
+| **AR heads** | 16 | 8 | Proportional to dim reduction |
+| **BERT features** | 1024-dim RoBERTa | Removed | Eliminates 330M external dependency |
+| **Attention mask** | Hybrid (bi+causal) | Pure causal | Simpler implementation |
+| **KV-Cache** | Yes | No | Clearer code, slower inference |
+| **DPO loss** | Optional | No | Simpler training objective |
+| **Optimizer** | ScaledAdam (k2) | AdamW | Standard PyTorch optimizer |
+| **PosteriorEncoder** | 16 layers | 8 layers | -50% WaveNet depth |
+| **Flow layers** | 4 | 2 | Fewer coupling layers |
+| **Generator upsample** | 512 channels | 256 channels | Smaller HiFi-GAN |
+| **MRTE** | Full cross-attention | Removed | Simplified text encoder |
+| **Total params** | ~70M | ~31.6M | 55% reduction |
 
-| 指标 | VALL-E | GPT-SoVITS | 说明 |
-|------|--------|------------|------|
-| MOS (自然度) | ~3.5-4.0 | ~4.0-4.5 | GPT-SoVITS 略优 |
-| 相似度 | ~70-80% | ~80-90% | VITS 声码器音色还原更好 |
-| 推理速度 | ~2-5x RTF | ~1-3x RTF | 序列短 8 倍 |
-| 训练成本 | 极高 (60k小时) | 低 (预训练+微调) | 不同的训练范式 |
+### 9.8.3 What We Sacrificed
 
-> **Neko 笔记**：GPT-SoVITS 在实际使用中更受欢迎，
-> 因为它可以用很少的数据（几分钟）微调出高质量的声音克隆。
-> 而 VALL-E 需要海量数据预训练才能实现零样本。
+| Aspect | Impact | Mitigation |
+|--------|--------|-----------|
+| Smaller AR | Lower capacity for complex prosody | Fine-tune longer on target data |
+| No BERT | Less linguistic information | Phoneme-only is sufficient for most use cases |
+| No KV-Cache | Slower inference (~O(T^2) vs O(T)) | Acceptable for teaching/demo |
+| Simpler TextEncoder | No explicit content-text-timbre fusion | Speaker conditioning via addition works for single-speaker |
+| Smaller Generator | Slightly lower audio quality | Acceptable for learning purposes |
+
+### 9.8.4 What We Preserved
+
+- **Core two-stage pipeline**: AR + VITS vocoder
+- **Single-codebook RVQ (n_q=1)**: The key efficiency innovation
+- **VAE + Flow + GAN training**: Full generative modeling pipeline
+- **Multi-Period Discriminator**: Same adversarial training approach
+- **Reference encoder**: Speaker embedding from reference audio
+- **All loss functions**: CE, mel, KL, adversarial, feature matching
 
 ---
 
-## 9.9 ONNX 导出
+## 9.9 ONNX Export
 
-### 9.9.1 导出策略
+### 9.9.1 Export Strategy
 
-GPT-SoVITS 将系统拆分为多个 ONNX 模型用于部署：
+GPT-SoVITS splits into two ONNX models for deployment:
 
 ```
   ONNX Export Architecture
@@ -765,117 +873,148 @@ GPT-SoVITS 将系统拆分为多个 ONNX 模型用于部署：
      Inputs:  phoneme_ids, speaker_emb
      Output:  waveform
      Opset:   17
-     (包含 TextEncoder + Flow⁻¹ + Generator)
-     (不含 PosteriorEncoder/Discriminator -- 仅训练需要)
+     (Includes TextEncoder + Flow^{-1} + Generator)
+     (Excludes PosteriorEncoder/Discriminator -- training only)
 ```
 
-### 9.9.2 动态轴
+### 9.9.2 Dynamic Axes
 
-所有 ONNX 模型支持变长输入：
+All ONNX models support variable-length inputs:
 
 ```python
 dynamic_axes = {
-    'phoneme_ids':  {1: 'text_len'},   # 文本长度可变
-    'semantic_ids': {1: 'audio_len'},  # 音频长度可变
-    'waveform':     {2: 'wav_len'},    # 输出波形长度可变
+    'phoneme_ids':  {1: 'text_len'},   # variable text length
+    'semantic_ids': {1: 'audio_len'},  # variable audio length
+    'waveform':     {2: 'wav_len'},    # variable output length
 }
 ```
 
-### 9.9.3 导出与测试
-
-```bash
-# 导出 ONNX
-python export_onnx.py --output-dir ../onnx_models
-
-# 带性能基准测试
-python export_onnx.py --output-dir ../onnx_models --benchmark
-```
-
-### 9.9.4 ONNX Runtime 推理
+### 9.9.3 ONNX Runtime Inference
 
 ```python
 import onnxruntime as ort
 
-# 加载 ONNX 模型
 ar_session = ort.InferenceSession('ar_model.onnx')
 vits_session = ort.InferenceSession('sovits_model.onnx')
 
-# AR 推理 (单次前向传播)
+# AR inference (single forward pass per step)
 logits = ar_session.run(None, {
     'phoneme_ids': phoneme_ids,
     'semantic_ids': current_tokens,
 })
 
-# 声码器推理
+# Vocoder inference (single forward pass)
 waveform = vits_session.run(None, {
     'phoneme_ids': phoneme_ids,
     'speaker_emb': speaker_emb,
 })
 ```
 
-ONNX Runtime 通常比 PyTorch 快 **1.5-2x**（通过算子融合和硬件优化）。
+ONNX Runtime is typically **1.5-2x faster** than PyTorch (via operator fusion and hardware optimization).
 
 ---
 
-## 9.10 本章小结
+## 9.10 Training and Inference Commands
 
-### GPT-SoVITS 的核心贡献
+### Quick Start
 
-| 问题 | GPT-SoVITS 的解决方案 |
-|------|----------------------|
-| 多层 Token 导致 AR 慢 | 单层语义 Token (n_q=1) |
-| Codec decoder 质量有限 | VITS 声码器 (VAE+Flow+GAN) |
-| 需要海量预训练数据 | 预训练 + 少样本微调 (3-10分钟) |
-| 音色和语义耦合 | 语义 Token + 参考音频分离 |
-| 推理延迟高 | 序列短 8 倍 + KV-Cache |
+```bash
+cd chapters/ch09_gpt_sovits/code
 
-### 遗留问题
+# Verify model shapes
+python model.py
 
-1. **自回归瓶颈**：即使只有 1 层 Token，AR 生成仍然是串行的 → **非自回归方案**
-2. **HuBERT 依赖**：需要预训练的 HuBERT 模型 (~95M) → **轻量 SSL 模型**
-3. **长文本质量下降**：AR 生成越长，累积误差越大 → **分段合成 + 拼接**
-4. **情感控制有限**：主要靠参考音频传递情感 → **情感条件生成 (Ch08)**
+# Train Stage 1 (AR model)
+python train.py --stage 1 --epochs 10 --batch-size 4 --lr 1e-4
 
-### 参考文献
+# Train Stage 2 (SoVITS vocoder)
+python train.py --stage 2 --epochs 10 --batch-size 4 --lr 1e-4
 
-- [1] Kim et al., 2021. *Conditional Variational Autoencoder with Adversarial Learning for End-to-End Text-to-Speech* (VITS).
-- [2] Wang et al., 2023. *Neural Codec Language Models for Zero-Shot TTS* (VALL-E).
-- [3] Hsu et al., 2021. *HuBERT: Self-Supervised Speech Representation Learning by Masked Prediction of Hidden Units*.
-- [4] Defossez et al., 2022. *High Fidelity Neural Audio Compression* (EnCodec).
-- [5] Kong et al., 2020. *HiFi-GAN: Generative Adversarial Networks for Efficient and High Fidelity Speech Synthesis*.
-- [6] GPT-SoVITS open-source project. https://github.com/RVC-Boss/GPT-SoVITS
+# Inference (basic)
+python inference.py --text "hello world" --output output.wav
 
----
+# Inference with trained model + reference audio
+python inference.py \
+    --ar-checkpoint ../checkpoints/ar_model.pt \
+    --sovits-checkpoint ../checkpoints/sovits_model.pt \
+    --ref-audio reference.wav \
+    --text "hello world" \
+    --output clone.wav
 
-## 习题
+# Benchmark inference speed
+python inference.py --text "hello world" --output output.wav --benchmark
 
-1. **n_q=1 的信息论分析**：如果 EnCodec 用 n_q=8 层码本 (每层 1024 entries)，总信息容量是 $1024^8$。GPT-SoVITS 只用 n_q=1 (1024 entries)，信息容量只有 1024。这意味着什么？GPT-SoVITS 靠什么弥补信息损失？
+# Export to ONNX
+python export_onnx.py --output-dir ../onnx_models
 
-2. **注意力掩码设计**：在 AR 模型中，为什么 text 部分使用双向注意力而 audio 部分使用因果注意力？如果全部使用因果注意力会怎样？如果全部使用双向注意力会怎样？
-
-3. **KL 散度的角色**：Stage 2 训练中，KL loss 的权重是 1.0，而 mel loss 的权重是 45.0。如果去掉 KL loss，会发生什么？如果把 KL loss 权重提高到 45，又会怎样？
-
-4. **Flow 的必要性**：如果去掉 Flow（直接从先验采样送给 Generator），生成质量会如何变化？Flow 解决了什么根本问题？
-
-5. **对比实验**：用相同文本和参考音频，分别用 Ch07 (VALL-E) 和 Ch09 (GPT-SoVITS) 合成。对比以下维度：
-   - 推理速度 (RTF)
-   - 音色相似度
-   - 自然度 (MOS)
-   - 生成 Token 序列长度
+# Export with benchmark
+python export_onnx.py --output-dir ../onnx_models --benchmark
+```
 
 ---
 
-## 目录结构
+## 9.11 Chapter Summary
+
+### GPT-SoVITS's Core Contributions
+
+| Problem | GPT-SoVITS's Solution |
+|---------|----------------------|
+| Multi-layer tokens make AR slow | Single-layer semantic token (n_q=1) |
+| Codec decoder quality is limited | VITS vocoder (VAE + Flow + GAN) |
+| Requires massive pretraining data | Pretrain + few-shot fine-tune (3-10 min) |
+| Timbre and semantics are coupled | Semantic tokens + reference audio separation |
+| High inference latency | 8x shorter sequences + KV-Cache |
+
+### Open Problems
+
+1. **Autoregressive bottleneck**: Even with 1-layer tokens, AR generation is sequential -> non-autoregressive alternatives
+2. **HuBERT dependency**: Requires a pretrained HuBERT model (~95M) -> lightweight SSL models
+3. **Long text quality degradation**: Longer generation = more accumulated error -> segmented synthesis + concatenation
+4. **Limited emotion control**: Emotion is inherited from reference audio -> explicit emotion conditioning (Ch08)
+
+---
+
+## Exercises
+
+1. **Information-theoretic analysis of n_q=1**: EnCodec uses n_q=8 codebooks (1024 entries each), total capacity = 1024^8. GPT-SoVITS uses n_q=1 (1024 entries), capacity = 1024. What does this mean? How does GPT-SoVITS compensate for the information loss?
+
+2. **Attention mask design**: In the AR model, why does the text portion use bidirectional attention while audio uses causal attention? What happens if everything is causal? What if everything is bidirectional?
+
+3. **KL loss role**: In Stage 2 training, KL loss weight is 1.0 while mel loss weight is 45.0. What happens if KL loss is removed? What if KL weight is raised to 45?
+
+4. **Flow necessity**: What happens if you remove the Flow (sample directly from the prior and feed to the Generator)? What fundamental problem does the Flow solve?
+
+5. **Comparative experiment**: Using the same text and reference audio, synthesize with Ch07 (VALL-E) and Ch09 (GPT-SoVITS). Compare:
+   - Inference speed (RTF)
+   - Speaker similarity
+   - Naturalness (MOS)
+   - Generated token sequence length
+
+---
+
+## References
+
+1. Kim et al., 2021. *Conditional Variational Autoencoder with Adversarial Learning for End-to-End Text-to-Speech* (VITS). [arXiv:2106.06103](https://arxiv.org/abs/2106.06103)
+2. Wang et al., 2023. *Neural Codec Language Models for Zero-Shot TTS* (VALL-E). [arXiv:2301.02111](https://arxiv.org/abs/2301.02111)
+3. Hsu et al., 2021. *HuBERT: Self-Supervised Speech Representation Learning by Masked Prediction of Hidden Units*. [arXiv:2106.07447](https://arxiv.org/abs/2106.07447)
+4. Defossez et al., 2022. *High Fidelity Neural Audio Compression* (EnCodec). [arXiv:2210.13438](https://arxiv.org/abs/2210.13438)
+5. Kong et al., 2020. *HiFi-GAN: Generative Adversarial Networks for Efficient and High Fidelity Speech Synthesis*. [arXiv:2010.05646](https://arxiv.org/abs/2010.05646)
+6. GPT-SoVITS open-source project. [github.com/RVC-Boss/GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)
+7. Dinh et al., 2016. *Density estimation using Real-NVP*. (Normalizing Flows). [arXiv:1605.08803](https://arxiv.org/abs/1605.08803)
+
+---
+
+## Directory Structure
 
 ```
 ch09_gpt_sovits/
-├── README.md              # 本章教程（你在这里）
-├── code/
-│   ├── model.py           # 所有模型组件 (~400行)
-│   ├── train.py           # 两阶段训练脚本 (~300行)
-│   ├── inference.py       # 端到端推理 (~200行)
-│   └── export_onnx.py     # ONNX 导出 (~150行)
-├── checkpoints/           # 训练保存的模型权重
-├── outputs/               # 生成的音频
-└── onnx_models/           # 导出的 ONNX 模型
+|-- README.md              # This tutorial (you are here)
+|-- code/
+|   |-- model.py           # All model components (~1281 lines)
+|   |-- train.py           # Two-stage training script
+|   |-- inference.py       # End-to-end inference
+|   +-- export_onnx.py     # ONNX export
+|-- checkpoints/           # Saved model weights
+|-- outputs/               # Generated audio
++-- onnx_models/           # Exported ONNX models
 ```

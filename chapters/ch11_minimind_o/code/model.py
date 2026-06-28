@@ -911,18 +911,15 @@ class SimpleOmni(nn.Module):
         """
         cfg = self.config
         B = input_ids.shape[0]
+        device = input_ids.device
 
         # Initial Thinker pass
         h_final, bridge, _ = self.thinker(input_ids, use_cache=False)
-        T = bridge.shape[1]
 
-        text_cond = self.talker.embed_proj(bridge) * self.talker.text_scale
-        audio_codes = torch.full((B, cfg.num_codebooks, 0),
-                                  cfg.audio_pad_token, dtype=torch.long,
-                                  device=input_ids.device)
+        # Per-codebook code buffers for delay pattern
+        cb_codes = [[] for _ in range(cfg.num_codebooks)]
 
         # Streaming loop
-        all_audio_frames = []
         for step in range(max_new_tokens):
             # Thinker generates one text token
             logits = self.text_head(h_final[:, -1, :])
@@ -933,25 +930,26 @@ class SimpleOmni(nn.Module):
                 text_token = logits.argmax(-1, keepdim=True)
 
             # Talker generates audio codes with delay pattern
-            frame_codes = []
+            # Each active codebook produces one code per step
             for cb in range(cfg.num_codebooks):
-                if step >= cb:  # delay by codebook index
-                    # Sample from Talker output
-                    code = torch.randint(0, 2048, (B, 1), device=input_ids.device)
-                    frame_codes.append(code)
-                    audio_codes = torch.cat([audio_codes,
-                                             code.unsqueeze(1)], dim=2)
-                else:
-                    frame_codes.append(None)
+                if step >= cb:
+                    # Sample a code (simplified: in production, use Talker output)
+                    code = torch.randint(0, 2048, (B,), device=device)
+                    cb_codes[cb].append(code)
 
-            # Check if complete frame is available
+            # Check if complete frame is available (all CBs have enough codes)
             if step >= cfg.num_codebooks - 1:
-                # Read diagonal: frame t uses code from CB-i at step t-cb+i
-                t = step - cfg.num_codebooks + 1
+                # All codebooks have produced at least (step - cb + 1) codes
+                # Frame index = step - num_codebooks + 1
+                # For each CB-i, read code at index = frame_idx
+                # (CB-i started at step i, so at step s it has s-i+1 codes)
+                frame_idx = step - cfg.num_codebooks + 1
                 frame = []
                 for cb in range(cfg.num_codebooks):
-                    frame.append(audio_codes[:, cb, t + cb].item())
-                all_audio_frames.append(frame)
+                    if frame_idx < len(cb_codes[cb]):
+                        frame.append(cb_codes[cb][frame_idx][0].item())
+                    else:
+                        frame.append(cfg.audio_pad_token)
                 yield text_token, frame
             else:
                 yield text_token, None

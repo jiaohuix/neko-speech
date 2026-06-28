@@ -2,25 +2,15 @@
 SimpleOmni ONNX Export
 ======================
 
-Export the Thinker and Talker components of SimpleOmni to ONNX format
-for deployment.
+Export the Thinker and Talker components of SimpleOmni to ONNX format.
 
 Why export separately?
-- Thinker and Talker have different input shapes during streaming
-- Thinker runs once per text token; Talker runs once per audio frame
-- Separating them allows different optimization strategies
-
-Deployment targets:
-- ONNX Runtime (CPU/GPU inference)
-- TensorRT (GPU-only, lower latency)
-- Mobile deployment (ONNX Runtime Mobile)
+- Thinker runs once per text token (causal LM)
+- Talker runs once per audio frame (acoustic generation)
+- Different optimization strategies for each
 
 Usage:
-    python export_onnx.py --weight ./checkpoints/a2a_epoch1.pth --output_dir ./onnx/
-
-Notes:
-- Frozen encoders (SenseVoice, Mimi) are exported separately if needed
-- For streaming inference, the KV-cache handling must be done externally
+    python export_onnx.py --weight ./checkpoints/t2a_epoch1.pth --output_dir ./onnx/
 """
 
 import os
@@ -32,19 +22,13 @@ from model import SimpleOmni, SimpleOmniConfig, count_parameters
 
 
 # ===========================================================================
-# Export Functions
+# Export Wrappers
 # ===========================================================================
 
 class ThinkerWrapper(torch.nn.Module):
-    """Wrapper to export Thinker as a standalone ONNX module.
+    """Wrapper to export Thinker as standalone ONNX module.
 
-    Inputs:
-        input_ids: (1, T) — text token IDs
-        past_kvs: list of (k, v) tensors for KV-cache (or empty)
-
-    Outputs:
-        text_logits: (1, T, vocab_size) — text prediction logits
-        bridge: (1, T, hidden_size) — bridge states for Talker
+    Outputs: text_logits + bridge states for Talker.
     """
 
     def __init__(self, model: SimpleOmni):
@@ -59,14 +43,10 @@ class ThinkerWrapper(torch.nn.Module):
 
 
 class TalkerWrapper(torch.nn.Module):
-    """Wrapper to export Talker as a standalone ONNX module.
+    """Wrapper to export Talker as standalone ONNX module.
 
-    Inputs:
-        bridge: (1, T, hidden_size) — from Thinker
-        audio_ids: (1, num_codebooks, T) — audio codebook IDs
-
-    Outputs:
-        audio_logits: list of (1, T, audio_vocab_size) per codebook
+    Inputs: bridge states from Thinker + audio codebook IDs.
+    Outputs: stacked audio logits (num_codebooks, T, audio_vocab_size).
     """
 
     def __init__(self, model: SimpleOmni):
@@ -89,22 +69,23 @@ class TalkerWrapper(torch.nn.Module):
         h = self.talker.norm(h)
         audio_logits = self.talker.lm_head(h)
 
-        # Stack for ONNX (list → tensor)
-        return torch.stack(audio_logits, dim=1)  # (1, num_codebooks, T, audio_vocab_size)
+        # Stack list -> tensor for ONNX compatibility
+        return torch.stack(audio_logits, dim=1)
 
+
+# ===========================================================================
+# Export Functions
+# ===========================================================================
 
 def export_thinker(model: SimpleOmni, output_dir: str, config: SimpleOmniConfig):
-    """Export Thinker to ONNX."""
-    wrapper = ThinkerWrapper(model).eval().half()
+    """Export Thinker to ONNX with dynamic sequence length."""
+    wrapper = ThinkerWrapper(model).eval()
 
     dummy_input = torch.randint(0, config.vocab_size, (1, 16))
-
     output_path = os.path.join(output_dir, "thinker.onnx")
 
     torch.onnx.export(
-        wrapper,
-        (dummy_input,),
-        output_path,
+        wrapper, (dummy_input,), output_path,
         input_names=["input_ids"],
         output_names=["text_logits", "bridge"],
         dynamic_axes={
@@ -116,29 +97,21 @@ def export_thinker(model: SimpleOmni, output_dir: str, config: SimpleOmniConfig)
         do_constant_folding=True,
     )
 
-    # Verify
-    import onnx
-    onnx_model = onnx.load(output_path)
-    onnx.checker.check_model(onnx_model)
-
     file_size = os.path.getsize(output_path) / (1024 * 1024)
     print(f"Thinker exported: {output_path} ({file_size:.1f} MB)")
 
 
 def export_talker(model: SimpleOmni, output_dir: str, config: SimpleOmniConfig):
-    """Export Talker to ONNX."""
-    wrapper = TalkerWrapper(model).eval().half()
+    """Export Talker to ONNX with dynamic sequence length."""
+    wrapper = TalkerWrapper(model).eval()
 
-    dummy_bridge = torch.randn(1, 16, config.hidden_size).half()
+    dummy_bridge = torch.randn(1, 16, config.hidden_size)
     dummy_audio_ids = torch.randint(0, config.audio_vocab_size,
                                      (1, config.num_codebooks, 16))
-
     output_path = os.path.join(output_dir, "talker.onnx")
 
     torch.onnx.export(
-        wrapper,
-        (dummy_bridge, dummy_audio_ids),
-        output_path,
+        wrapper, (dummy_bridge, dummy_audio_ids), output_path,
         input_names=["bridge", "audio_ids"],
         output_names=["audio_logits"],
         dynamic_axes={
@@ -149,10 +122,6 @@ def export_talker(model: SimpleOmni, output_dir: str, config: SimpleOmniConfig):
         opset_version=17,
         do_constant_folding=True,
     )
-
-    import onnx
-    onnx_model = onnx.load(output_path)
-    onnx.checker.check_model(onnx_model)
 
     file_size = os.path.getsize(output_path) / (1024 * 1024)
     print(f"Talker exported: {output_path} ({file_size:.1f} MB)")
@@ -168,7 +137,6 @@ def verify_onnx(output_dir: str, model: SimpleOmni, config: SimpleOmniConfig):
 
     print("\nVerifying ONNX outputs...")
 
-    # Thinker verification
     thinker_path = os.path.join(output_dir, "thinker.onnx")
     if os.path.exists(thinker_path):
         sess = ort.InferenceSession(thinker_path, providers=["CPUExecutionProvider"])
@@ -181,9 +149,10 @@ def verify_onnx(output_dir: str, model: SimpleOmni, config: SimpleOmniConfig):
 
         text_diff = np.abs(ort_out[0] - pt_out[0].float().numpy()).max()
         bridge_diff = np.abs(ort_out[1] - pt_out[1].float().numpy()).max()
-        print(f"  Thinker — text_logits max diff: {text_diff:.6f}")
-        print(f"  Thinker — bridge max diff:      {bridge_diff:.6f}")
-        print(f"  {'PASS' if text_diff < 1e-2 and bridge_diff < 1e-2 else 'FAIL'}")
+        print(f"  Thinker text_logits max diff: {text_diff:.6f}")
+        print(f"  Thinker bridge max diff:      {bridge_diff:.6f}")
+        ok = text_diff < 1e-2 and bridge_diff < 1e-2
+        print(f"  {'PASS' if ok else 'FAIL'}")
 
 
 # ===========================================================================
@@ -200,7 +169,6 @@ if __name__ == "__main__":
                         help="Verify ONNX outputs match PyTorch")
 
     args = parser.parse_args()
-
     os.makedirs(args.output_dir, exist_ok=True)
 
     config = SimpleOmniConfig()

@@ -1,63 +1,61 @@
-# 系统文件
+# System files
 .DS_Store
 Thumbs.db
 *.swp
 *.swo
 
-# IDE - VSCode
+# IDE
 .vscode/
-*.code-workspace
-.history/
-
-# IDE - IntelliJ IDEA
 .idea/
 *.iml
 *.iws
 *.ipr
 out/
-
-# IDE - PyCharm
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+
+# Python environments
 venv/
 env/
 .venv/
 
-# Node.js
-node_modules/
-npm-debug.log
-yarn-error.log
-dist/
-build/
-
-# Java
-target/
-*.class
-*.jar
-*.war
-
-# C/C++
-*.o
-*.exe
-*.dll
-*.so
-*.a
-build/
-cmake-build-*/
-
-# 日志
+# Logs
 *.log
 logs/
-
-# 临时文件
 tmp/
 temp/
 
-# 环境变量配置
+# Environment secrets
 .env
 .env.local
 .env.dev
+
+# Reference materials (not part of the textbook)
 ref_codes/
 spec/
+
+# ============================================================================
+# LARGE / GENERATED FILES — Do not commit
+# ============================================================================
+
+# Model checkpoints (can be 100MB+)
+chapters/**/checkpoints/
+
+# Generated audio outputs
+chapters/**/outputs/
+
+# Dataset (audio files + metadata)
+data/raw/
+data/processed/
+
+# Generated figures
+chapters/**/figures/
+
+# Generated images
+skills/image-gen/imgs/
+assets/
+
+# Training logs
+chapters/**/loss_log.csv

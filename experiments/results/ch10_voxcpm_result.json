@@ -1,0 +1,17 @@
+{
+  "model": "ch10_voxcpm",
+  "timestamp": "2026-06-29T01:17:22.546256",
+  "status": "complete",
+  "final_loss": null,
+  "train_time_total": 33.31583905220032,
+  "epoch_times": [
+    6.3,
+    3.1,
+    3.4
+  ],
+  "gpu_memory_mb": 0.0,
+  "params": 54267649,
+  "params_millions": 54.267649,
+  "inference_success": true,
+  "rtf": 9.917
+}

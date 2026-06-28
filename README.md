@@ -12,14 +12,16 @@ The long-term goal: a lightweight, local AI catgirl voice assistant.
 
 | Chapter | Topic | Status | Key Output |
 |---------|-------|--------|------------|
-| Ch01 | Audio Fundamentals | Done | Waveform, FFT, STFT, Mel, Griffin-Lim |
-| Ch02 | Tacotron2 | Training | End-to-end TTS pipeline |
-| Ch03 | WaveNet | Planned | Neural vocoder |
-| Ch04 | FastSpeech | Planned | Non-autoregressive TTS |
-| Ch05 | VITS | Planned | End-to-end with flow |
-| Ch06 | GPT-SoVITS | Planned | Few-shot voice cloning |
-| Ch07 | Modern Audio Models | Planned | Recent advances |
-| Ch08 | Omni | Planned | Multimodal integration |
+| Ch01 | Audio Fundamentals | ✅ Done | Waveform, FFT, STFT, Mel, Griffin-Lim |
+| Ch02 | Tacotron2 | 🔄 Training | End-to-end TTS pipeline |
+| Ch03 | WaveNet | 🚧 In Progress | Neural vocoder |
+| Ch04 | FastSpeech2 | 🚧 In Progress | Non-autoregressive TTS |
+| Ch05 | VITS | 🚧 In Progress | End-to-end with flow |
+| Ch06 | Neural Audio Codec | 🚧 In Progress | EnCodec, RVQ-VAE |
+| Ch07 | VALL-E | 🚧 In Progress | Codec language model |
+| Ch08 | Modern Models | 🚧 In Progress | F5-TTS, CosyVoice, IndexTTS |
+| Ch09 | Voice Cloning | Planned | GPT-SoVITS, zero-shot |
+| Ch10 | Deployment | Planned | Local catgirl assistant |
 
 ---
 

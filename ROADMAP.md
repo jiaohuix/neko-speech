@@ -18,6 +18,7 @@
 |------|------|------|------|
 | **Ch01** | 音频基础：波形、采样、FFT、STFT、Mel、Griffin-Lim | 完成 | 5个演示脚本 + 5张Neko插画 |
 | **Ch02** | Tacotron2：端到端TTS | 训练中 | model.py / train.py / inference.py / test_tts.py / eval_reconstruct.py |
+| **Ch07** | VALL-E：Codec LM 范式，AR+NAR 零样本 TTS | 完成 | codec.py / valle.py / generate.py / train.py |
 | **数据集** | Neko Audio 80K（ModelScope） | 下载中 | ~858条/目标3000+ |
 
 ### Ch02 当前状态
@@ -71,6 +72,16 @@ neko-speech/
 |   |   |   |-- inference.py       # 推理（自回归）
 |   |   |   |-- test_tts.py        # 端到端测试
 |   |   |   |-- eval_reconstruct.py # 训练集复现评估
+|   |   |-- checkpoints/           # 模型保存（gitignore）
+|   |   |-- outputs/               # 生成音频（gitignore）
+|   |
+|   |-- ch07_valle/
+|   |   |-- README.md
+|   |   |-- code/
+|   |   |   |-- codec.py           # 神经音频Codec（VQ encoder-decoder）
+|   |   |   |-- valle.py           # VALL-E模型（AR + NAR Transformers）
+|   |   |   |-- generate.py        # 零样本推理流水线
+|   |   |   |-- train.py           # 两阶段训练脚本
 |   |   |-- checkpoints/           # 模型保存（gitignore）
 |   |   |-- outputs/               # 生成音频（gitignore）
 |
@@ -132,9 +143,10 @@ chXX_name/
 | **Ch04 FastSpeech2** | TBD | Ch02 Tacotron2 | 非自回归TTS，并行生成 | 中 |
 | **Ch05 VITS** | TBD | Ch03+Ch04 | 端到端+flow，音质最佳 | 高 |
 | **Ch06 GPT-SoVITS** | TBD | Ch02+Ch03 | Few-shot音色克隆，实用路线 | 高 |
-| **Ch07 SoVITS / RVC** | TBD | Ch06 | 歌声转换/实时变声 | 高 |
-| **Ch08 现代模型** | TBD | 前面全部 | F5-TTS, CosyVoice 等最新工作 | 高 |
-| **Ch09 部署** | TBD | 前面全部 | ONNX导出, CPU推理优化, 本地GUI | 中 |
+| **Ch07 VALL-E** | Done | Ch01+Ch02 | Codec LM 范式，AR+NAR 零样本 TTS | 高 |
+| **Ch08 SoVITS / RVC** | TBD | Ch06+Ch07 | 歌声转换/实时变声 | 高 |
+| **Ch09 现代模型** | TBD | 前面全部 | F5-TTS, CosyVoice 等最新工作 | 高 |
+| **Ch10 部署** | TBD | 前面全部 | ONNX导出, CPU推理优化, 本地GUI | 中 |
 
 ### 每章开发 Checklist
 

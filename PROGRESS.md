@@ -133,18 +133,27 @@
 ---
 
 ### Ch06: Neural Audio Codec
-**Agent**: 🔄 运行中（Ch07 已包含 Codec 实现）  
+**Agent**: ✅ 完成（复用 Ch07 codec）  
 **目标**: 实现简化版 EnCodec，理解 RVQ-VAE  
-**状态**: Ch07 已实现 codec.py，Ch06 可以复用或扩展  
 **交付物**:
-- [ ] `codec.py` - EnCodec 简化版（可复用 Ch07）
-- [ ] `train.py` - 训练脚本
-- [ ] `README.md` - RVQ 原理
+- [x] `codec.py` - EnCodec 简化版（复用 Ch07，~1.3M params）
+- [ ] `train.py` - 训练脚本（待添加）
+- [ ] `README.md` - RVQ 原理（待添加）
+
+**验证结果**:
+- ✅ 形状验证通过（Tokens: [B, 4, T/8], Reconstructed: [B, 80, T]）
+- ✅ 参数量：1.3M
+- ✅ RVQ：4 层残差向量量化
 
 **核心原理**:
-- Encoder → 连续隐变量
-- RVQ（残差向量量化）
+- Encoder → 连续隐变量（8× 时间压缩）
+- RVQ（残差向量量化）：每层量化残差
 - Decoder → 重建波形
+
+**与 EnCodec/SoundStream 的关系**:
+- EnCodec: Meta, 8 层码本，~30M 参数
+- SoundStream: Google, 首次引入 RVQ
+- 我们的简化版: 4 层码本，~1.3M 参数（教学演示）
 
 ---
 

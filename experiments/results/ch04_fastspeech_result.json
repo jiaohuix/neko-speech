@@ -1,0 +1,13 @@
+{
+  "model": "ch04_fastspeech",
+  "timestamp": "2026-06-29T01:09:41.865525",
+  "status": "complete",
+  "final_loss": null,
+  "train_time_total": 183.10906505584717,
+  "epoch_times": [],
+  "gpu_memory_mb": 0.0,
+  "params": 2245971,
+  "params_millions": 2.245971,
+  "inference_success": false,
+  "inference_error": " for decoder.blocks.1.ffn.3.bias: copying a param with shape torch.Size([128]) from checkpoint, the shape in current model is torch.Size([256]).\n\tsize mismatch for mel_proj.weight: copying a param with shape torch.Size([80, 128]) from checkpoint, the shape in current model is torch.Size([80, 256]).\n"
+}

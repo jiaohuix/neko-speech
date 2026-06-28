@@ -1,0 +1,13 @@
+{
+  "model": "ch05_vits",
+  "timestamp": "2026-06-29T01:12:55.657016",
+  "status": "complete",
+  "final_loss": null,
+  "train_time_total": 7.6289520263671875,
+  "epoch_times": [],
+  "gpu_memory_mb": 0.0,
+  "params": 14439972,
+  "params_millions": 14.439972,
+  "inference_success": false,
+  "inference_error": "No checkpoint found"
+}

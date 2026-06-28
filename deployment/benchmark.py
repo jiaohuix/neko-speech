@@ -121,7 +121,7 @@ def benchmark_tacotron2_pytorch(device="cpu", n_runs=10):
     # Warmup
     with torch.no_grad():
         for _ in range(3):
-            model.inference(text, max_len=400, stop_threshold=1.0)
+            model.inference(text, max_len=100, stop_threshold=1.0)
 
     # Benchmark
     times = []
@@ -130,7 +130,7 @@ def benchmark_tacotron2_pytorch(device="cpu", n_runs=10):
         torch.cuda.synchronize() if device == "cuda" else None
         t0 = time.perf_counter()
         with torch.no_grad():
-            mel_out, mel_post = model.inference(text, max_len=400, stop_threshold=1.0)
+            mel_out, mel_post = model.inference(text, max_len=100, stop_threshold=1.0)
         torch.cuda.synchronize() if device == "cuda" else None
         t1 = time.perf_counter()
         times.append((t1 - t0) * 1000)

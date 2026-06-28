@@ -1,0 +1,44 @@
+[
+  {
+    "model": "VITS",
+    "framework": "PyTorch",
+    "device": "cpu",
+    "load_time_ms": 529.9105180019978,
+    "params": 16973891,
+    "inference_time_ms": 442.10167033331044,
+    "inference_std_ms": 175.34901312373574,
+    "audio_length_s": 0.352,
+    "rtf": 1.2559706543559956,
+    "memory_mb": 63.78125
+  },
+  {
+    "model": "vits_full.onnx",
+    "framework": "ONNX",
+    "device": "CPU",
+    "file_size_mb": 56.20602989196777,
+    "load_time_ms": 1172.104612000112,
+    "inference_time_ms": 147.28864800053998,
+    "inference_std_ms": 26.287602000071274,
+    "n_runs": 3
+  },
+  {
+    "model": "vits_generator.onnx",
+    "framework": "ONNX",
+    "device": "CPU",
+    "file_size_mb": 48.69325256347656,
+    "load_time_ms": 123.84192800163873,
+    "inference_time_ms": 241.65783266653307,
+    "inference_std_ms": 17.774235954233916,
+    "n_runs": 3
+  },
+  {
+    "model": "vits_text_encoder.onnx",
+    "framework": "ONNX",
+    "device": "CPU",
+    "file_size_mb": 2.7285709381103516,
+    "load_time_ms": 45.347185998252826,
+    "inference_time_ms": 1.7795353342080489,
+    "inference_std_ms": 0.47672702449176596,
+    "n_runs": 3
+  }
+]

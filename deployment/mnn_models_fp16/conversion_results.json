@@ -1,0 +1,80 @@
+[
+  {
+    "onnx_path": "./onnx_models/fastspeech2_encoder.onnx",
+    "mnn_path": "./mnn_models_fp16/fastspeech2_encoder.mnn",
+    "command": "/home/jhx/Projects/nlp/MNN/build/MNNConvert --framework ONNX --modelFile ./onnx_models/fastspeech2_encoder.onnx --MNNModel ./mnn_models_fp16/fastspeech2_encoder.mnn --optimizeLevel 1 --fp16",
+    "success": true,
+    "error": null,
+    "stdout": "The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0\nDon't has bizCode, use MNNTest for default\nStart to Convert Other Model Format To MNN Model..., target version: 3.5\n[00:52:27] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:46: ONNX Model ir version: 7\n[00:52:27] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:47: ONNX Model opset version: 14\nStart to Optimize the MNN Net...\nFuseLayerNorm as /encoder/blocks.0/norm1/Add_1_output_0\nFuseLayerNorm as /encoder/blocks.0/norm2/Add_1_output_0\nFuseLayerNorm as /encoder/blocks.1/norm1/Add_1_output_0\nFuseLayerNorm as /encoder/blocks.1/norm2/Add_1_output_0\nFuseLayerNorm as /encoder/blocks.2/norm1/Add_1_output_0\nFuseLayerNorm as /encoder/blocks.2/norm2/Add_1_output_0\nFuseLayerNorm as /encoder/blocks.3/norm1/Add_1_output_0\nFuseLayerNorm as /encoder/blocks.3/norm2/Add_1_output_0\nFuseLayerNorm as /pitch_predictor/norm1/Add_1_output_0\nFuseLayerNorm as /pitch_predictor/norm2/Add_1_output_0\nFuseLayerNorm as /dur_predictor/norm1/Add_1_output_0\nFuseLayerNorm as /dur_predictor/norm2/Add_1_output_0\nFuseLayerNorm as /energy_predictor/norm1/Add_1_output_0\nFuseLayerNorm as /energy_predictor/norm2/Add_1_output_0\ninputTensors : [ text, text_lens, ]\noutputTensors: [ features, log_dur, pitch, energy, ]\nConverted Success!\n",
+    "stderr": "",
+    "returncode": 0,
+    "onnx_size_mb": 18.85312271118164,
+    "mnn_size_mb": 9.540340423583984,
+    "compression_ratio": 1.9761477970509524
+  },
+  {
+    "onnx_path": "./onnx_models/tacotron2_encoder.onnx",
+    "mnn_path": "./mnn_models_fp16/tacotron2_encoder.mnn",
+    "command": "/home/jhx/Projects/nlp/MNN/build/MNNConvert --framework ONNX --modelFile ./onnx_models/tacotron2_encoder.onnx --MNNModel ./mnn_models_fp16/tacotron2_encoder.mnn --optimizeLevel 1 --fp16",
+    "success": true,
+    "error": null,
+    "stdout": "The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0\nDon't has bizCode, use MNNTest for default\nStart to Convert Other Model Format To MNN Model..., target version: 3.5\n[00:52:29] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:46: ONNX Model ir version: 7\n[00:52:29] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:47: ONNX Model opset version: 14\n[00:52:29] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:149: Check it out ==> /encoder/lstm/LSTM_output_0 has empty input, the index is 4\nStart to Optimize the MNN Net...\nUse While to compute LSTM, if don't want it, add --useOriginRNNImpl \ninputTensors : [ text_tokens, ]\noutputTensors: [ encoder_out, ]\nThe model has subgraphs, please use MNN::Express::Module to run it\nConverted Success!\n",
+    "stderr": "",
+    "returncode": 0,
+    "onnx_size_mb": 21.525222778320312,
+    "mnn_size_mb": 10.787181854248047,
+    "compression_ratio": 1.9954445071159685
+  },
+  {
+    "onnx_path": "./onnx_models/tacotron2_postnet.onnx",
+    "mnn_path": "./mnn_models_fp16/tacotron2_postnet.mnn",
+    "command": "/home/jhx/Projects/nlp/MNN/build/MNNConvert --framework ONNX --modelFile ./onnx_models/tacotron2_postnet.onnx --MNNModel ./mnn_models_fp16/tacotron2_postnet.mnn --optimizeLevel 1 --fp16",
+    "success": true,
+    "error": null,
+    "stdout": "The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0\nDon't has bizCode, use MNNTest for default\nStart to Convert Other Model Format To MNN Model..., target version: 3.5\n[00:52:30] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:46: ONNX Model ir version: 7\n[00:52:30] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:47: ONNX Model opset version: 14\nStart to Optimize the MNN Net...\ninputTensors : [ mel_before, ]\noutputTensors: [ mel_after, ]\nConverted Success!\n",
+    "stderr": "",
+    "returncode": 0,
+    "onnx_size_mb": 16.572705268859863,
+    "mnn_size_mb": 8.29251480102539,
+    "compression_ratio": 1.9985138002781262
+  },
+  {
+    "onnx_path": "./onnx_models/vits_full.onnx",
+    "mnn_path": "./mnn_models_fp16/vits_full.mnn",
+    "command": "/home/jhx/Projects/nlp/MNN/build/MNNConvert --framework ONNX --modelFile ./onnx_models/vits_full.onnx --MNNModel ./mnn_models_fp16/vits_full.mnn --optimizeLevel 1 --fp16",
+    "success": true,
+    "error": null,
+    "stdout": "The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0\nDon't has bizCode, use MNNTest for default\nStart to Convert Other Model Format To MNN Model..., target version: 3.5\n[00:52:31] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:46: ONNX Model ir version: 7\n[00:52:31] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:47: ONNX Model opset version: 14\nStart to Optimize the MNN Net...\nThe model has random OP: /RandomNormalLike_output_0, can't check result with onnxruntime\nThe Convolution use shared weight, may increase the model size\nFuseLayerNorm as /text_encoder/layers.0/norm1/Add_1_output_0\nFuseLayerNorm as /text_encoder/layers.0/norm2/Add_1_output_0\nFuseLayerNorm as /text_encoder/layers.1/norm1/Add_1_output_0\nFuseLayerNorm as /text_encoder/layers.1/norm2/Add_1_output_0\nFuseLayerNorm as /text_encoder/norm/Add_1_output_0\ninputTensors : [ text_ids, text_lengths, noise_scale, ]\noutputTensors: [ wav, ]\nConverted Success!\n",
+    "stderr": "",
+    "returncode": 0,
+    "onnx_size_mb": 56.20602989196777,
+    "mnn_size_mb": 28.33025360107422,
+    "compression_ratio": 1.9839578806254163
+  },
+  {
+    "onnx_path": "./onnx_models/vits_generator.onnx",
+    "mnn_path": "./mnn_models_fp16/vits_generator.mnn",
+    "command": "/home/jhx/Projects/nlp/MNN/build/MNNConvert --framework ONNX --modelFile ./onnx_models/vits_generator.onnx --MNNModel ./mnn_models_fp16/vits_generator.mnn --optimizeLevel 1 --fp16",
+    "success": true,
+    "error": null,
+    "stdout": "The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0\nDon't has bizCode, use MNNTest for default\nStart to Convert Other Model Format To MNN Model..., target version: 3.5\n[00:52:42] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:46: ONNX Model ir version: 7\n[00:52:42] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:47: ONNX Model opset version: 14\nStart to Optimize the MNN Net...\ninputTensors : [ z, ]\noutputTensors: [ wav, ]\nConverted Success!\n",
+    "stderr": "",
+    "returncode": 0,
+    "onnx_size_mb": 48.69325256347656,
+    "mnn_size_mb": 24.371978759765625,
+    "compression_ratio": 1.997919538805015
+  },
+  {
+    "onnx_path": "./onnx_models/vits_text_encoder.onnx",
+    "mnn_path": "./mnn_models_fp16/vits_text_encoder.mnn",
+    "command": "/home/jhx/Projects/nlp/MNN/build/MNNConvert --framework ONNX --modelFile ./onnx_models/vits_text_encoder.onnx --MNNModel ./mnn_models_fp16/vits_text_encoder.mnn --optimizeLevel 1 --fp16",
+    "success": true,
+    "error": null,
+    "stdout": "The device supports: i8sdot:0, fp16:0, i8mm: 0, sve2: 0, sme2: 0\nDon't has bizCode, use MNNTest for default\nStart to Convert Other Model Format To MNN Model..., target version: 3.5\n[00:52:44] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:46: ONNX Model ir version: 7\n[00:52:44] /home/jhx/Projects/nlp/MNN/tools/converter/source/onnx/onnxConverter.cpp:47: ONNX Model opset version: 14\nStart to Optimize the MNN Net...\nFuseLayerNorm as /layers.0/norm1/Add_1_output_0\nFuseLayerNorm as /layers.0/norm2/Add_1_output_0\nFuseLayerNorm as /layers.1/norm1/Add_1_output_0\nFuseLayerNorm as /layers.1/norm2/Add_1_output_0\nFuseLayerNorm as /norm/Add_1_output_0\ninputTensors : [ text_ids, text_lengths, ]\noutputTensors: [ x, m_p, logs_p, mask, ]\nConverted Success!\n",
+    "stderr": "",
+    "returncode": 0,
+    "onnx_size_mb": 2.7285709381103516,
+    "mnn_size_mb": 1.4037322998046875,
+    "compression_ratio": 1.9437972172400675
+  }
+]

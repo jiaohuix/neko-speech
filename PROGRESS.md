@@ -100,10 +100,11 @@
 ---
 
 ### Ch06: Neural Audio Codec
-**Agent**: 运行中  
+**Agent**: 🔄 运行中（Ch07 已包含 Codec 实现）  
 **目标**: 实现简化版 EnCodec，理解 RVQ-VAE  
+**状态**: Ch07 已实现 codec.py，Ch06 可以复用或扩展  
 **交付物**:
-- [ ] `codec.py` - EnCodec 简化版
+- [ ] `codec.py` - EnCodec 简化版（可复用 Ch07）
 - [ ] `train.py` - 训练脚本
 - [ ] `README.md` - RVQ 原理
 
@@ -115,17 +116,25 @@
 ---
 
 ### Ch07: VALL-E Codec Language Model
-**Agent**: 运行中  
+**Agent**: ✅ 完成  
 **目标**: 把 TTS 当作语言建模，零样本克隆  
 **交付物**:
-- [ ] `valle.py` - VALL-E 简化版
-- [ ] `generate.py` - 零样本推理
-- [ ] `README.md` - Codec LM 范式
+- [x] `codec.py` - 神经音频 Codec + RVQ (324行, ~1.3M params)
+- [x] `valle.py` - VALL-E AR+NAR Transformer (571行, ~9.5M params)
+- [x] `generate.py` - 零样本推理流水线 (447行)
+- [x] `train.py` - 两阶段训练脚本 (618行)
+- [x] `README.md` - Codec LM 范式详解 (600行)
 
-**核心原理**:
-- Audio Tokens as Language
-- AR + NAR Transformer
-- Zero-shot Voice Cloning
+**验证结果**:
+- ✅ 语法检查通过
+- ✅ 形状验证通过（Codec: 1.3M params, VALL-E: 9.5M params）
+- ✅ 训练测试通过（loss ~5.7 ≈ log(256)）
+- ✅ 端到端流水线跑通
+
+**核心创新**:
+- TTS as Language Modeling：音频 Token 序列建模
+- AR + NAR 双阶段生成
+- 零样本声音克隆：prompt tokens = 音色信息
 
 ---
 

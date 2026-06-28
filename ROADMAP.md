@@ -1,5 +1,7 @@
 # Neko Speech — 全局架构与开发路线图
 
+> **开发者必读顺序**：`AGENTS.md`（治理原则）→ `ROADMAP.md`（本文档，架构与分工）→ `CONTRIBUTING.md`（章节开发 SOP）
+
 ## 1. 项目定位
 
 一本**开源的 Audio AI 教科书**，从零开始用 PyTorch 实现经典语音合成模型。

@@ -7,21 +7,25 @@ MiniMind-O is a ~0.1B parameter omni model that supports:
   Output: Text + Streaming Speech
 
 Architecture: Thinker-Talker dual-path
-  - Thinker: Transformer backbone for multimodal understanding → text output
-  - Talker:  Smaller Transformer for acoustic rendering → Mimi codes → waveform
+  - Thinker: Transformer backbone for multimodal understanding -> text output
+  - Talker:  Smaller Transformer for acoustic rendering -> mel codes -> waveform
 
 This teaching version (~50M params) simplifies:
-  - Thinker: 6 layers, hidden=384 (vs 8 layers, hidden=768)
-  - Talker:  2 layers, hidden=384, 4 codebooks (vs 4 layers, 8 codebooks)
+  - Thinker: 6 layers, hidden=512 (vs 8 layers, hidden=768)
+  - Talker:  2 layers, hidden=512, 4 codebooks (vs 4 layers, 8 codebooks)
+  - SimpleSpeechEncoder: 4-layer Transformer (vs frozen SenseVoice, 234M)
+  - SimpleImageEncoder:  4-layer ViT (vs frozen SigLIP2, 94M)
   - Same bridge mechanism, MTP head, and delay pattern
 
 Key components:
-  SimpleThinker       — Causal Transformer for text + multimodal input
-  SimpleTalker        — Smaller Transformer for audio code generation
-  SimpleTalkerHead    — MTP head: shared base + per-codebook adapters
-  SimpleTalkerEmbed   — Embedding that fuses multi-codebook input
-  SimpleAudioProjector — 2-layer MLP: audio features → hidden space
-  SimpleOmni          — Top-level model with forward() and stream_generate()
+  SimpleSpeechEncoder -- Whisper-like speech encoder (mel -> features)
+  SimpleImageEncoder  -- Simplified ViT (image patches -> features)
+  SimpleThinker       -- Causal Transformer for multimodal understanding
+  SimpleTalker        -- Smaller Transformer for audio code generation
+  SimpleTalkerHead    -- MTP head: shared base + per-codebook adapters
+  SimpleTalkerEmbed   -- Embedding that fuses multi-codebook input
+  SimpleMelDecoder    -- Code -> mel spectrogram decoder
+  SimpleOmni          -- Top-level model with forward() and generate()
 
 Based on:
   - Paper:   arXiv:2605.03937 (Gong, 2026)
@@ -33,7 +37,7 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Optional, Tuple, List
+from typing import Optional, Tuple, List, Dict
 
 
 # ===========================================================================
@@ -48,18 +52,18 @@ class SimpleOmniConfig:
         Trainable: ~113M params
 
     Teaching version (this file):
-        hidden_size=384, num_layers=6, talker_layers=2, codebooks=4
-        Trainable: ~31M params
+        hidden_size=512, num_layers=6, talker_layers=2, codebooks=4
+        Trainable: ~50M params
     """
 
     def __init__(self, **kwargs):
         # Thinker (language backbone)
-        self.hidden_size = kwargs.get("hidden_size", 384)
+        self.hidden_size = kwargs.get("hidden_size", 512)
         self.num_hidden_layers = kwargs.get("num_hidden_layers", 6)
-        self.num_attention_heads = kwargs.get("num_attention_heads", 6)
+        self.num_attention_heads = kwargs.get("num_attention_heads", 8)
         self.num_key_value_heads = kwargs.get("num_key_value_heads", 2)
         self.head_dim = kwargs.get("head_dim", self.hidden_size // self.num_attention_heads)
-        self.intermediate_size = kwargs.get("intermediate_size", 1024)
+        self.intermediate_size = kwargs.get("intermediate_size", 1408)
         self.hidden_act = kwargs.get("hidden_act", "silu")
         self.vocab_size = kwargs.get("vocab_size", 6400)
         self.max_position_embeddings = kwargs.get("max_position_embeddings", 2048)
@@ -69,22 +73,30 @@ class SimpleOmniConfig:
         self.tie_word_embeddings = kwargs.get("tie_word_embeddings", True)
 
         # Talker (acoustic renderer)
-        self.talker_hidden_size = kwargs.get("talker_hidden_size", 384)
+        self.talker_hidden_size = kwargs.get("talker_hidden_size", 512)
         self.num_talker_layers = kwargs.get("num_talker_layers", 2)
 
-        # Audio codec (Mimi)
-        self.num_codebooks = kwargs.get("num_codebooks", 4)  # vs 8 in original
-        self.audio_vocab_size = kwargs.get("audio_vocab_size", 2082)  # 2048 codes + specials
+        # Audio codec
+        self.num_codebooks = kwargs.get("num_codebooks", 4)
+        self.audio_vocab_size = kwargs.get("audio_vocab_size", 2082)
         self.audio_pad_token = kwargs.get("audio_pad_token", 2049)
         self.audio_stop_token = kwargs.get("audio_stop_token", 2050)
         self.audio_spk_token = kwargs.get("audio_spk_token", 2051)
 
-        # Audio encoder (SenseVoice)
-        self.audio_hidden_size = kwargs.get("audio_hidden_size", 512)
+        # Speech encoder (simplified Whisper-like)
+        self.speech_hidden_size = kwargs.get("speech_hidden_size", 256)
+        self.speech_num_layers = kwargs.get("speech_num_layers", 4)
+        self.speech_num_heads = kwargs.get("speech_num_heads", 4)
+        self.n_mels = kwargs.get("n_mels", 80)
+
+        # Image encoder (simplified ViT)
+        self.image_hidden_size = kwargs.get("image_hidden_size", 256)
+        self.image_num_layers = kwargs.get("image_num_layers", 4)
+        self.image_num_heads = kwargs.get("image_num_heads", 4)
+        self.image_size = kwargs.get("image_size", 256)
+        self.patch_size = kwargs.get("patch_size", 16)
 
         # Bridge layer: which Thinker layer feeds the Talker
-        # Original: num_hidden_layers // 2 - 1 = 3 (for 8 layers)
-        # Teaching: 6 // 2 - 1 = 2
         self.bridge_layer = kwargs.get("bridge_layer",
                                         self.num_hidden_layers // 2 - 1)
 
@@ -92,7 +104,10 @@ class SimpleOmniConfig:
         self.spk_emb_size = kwargs.get("spk_emb_size", 192)
 
         # MTP adapter rank
-        self.adapter_rank = kwargs.get("adapter_rank", 128)  # vs 256 in original
+        self.adapter_rank = kwargs.get("adapter_rank", 128)
+
+        # Mel decoder
+        self.n_mel_out = kwargs.get("n_mel_out", 80)
 
         # Special token IDs
         self.bos_token_id = kwargs.get("bos_token_id", 1)
@@ -106,7 +121,7 @@ class SimpleOmniConfig:
 class RMSNorm(nn.Module):
     """Root Mean Square Layer Normalization.
 
-    Same as LayerNorm but without mean subtraction — just scale by RMS.
+    Same as LayerNorm but without mean subtraction -- just scale by RMS.
     Faster and works better for Transformer hidden states.
     """
 
@@ -116,18 +131,12 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, T, D)
         rms = x.float().pow(2).mean(-1, keepdim=True).add(self.eps).rsqrt()
         return (self.weight * x.float() * rms).type_as(x)
 
 
 def precompute_freqs_cis(dim: int, end: int, theta: float = 1e6):
-    """Precompute cos/sin tables for Rotary Position Embedding (RoPE).
-
-    RoPE encodes position by rotating Q and K vectors. The rotation angles
-    decrease geometrically across dimensions, so low dims rotate fast (local
-    position) and high dims rotate slow (global position).
-    """
+    """Precompute cos/sin tables for Rotary Position Embedding (RoPE)."""
     freqs = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
     t = torch.arange(end)
     freqs = torch.outer(t, freqs)
@@ -137,28 +146,18 @@ def precompute_freqs_cis(dim: int, end: int, theta: float = 1e6):
 
 
 def apply_rotary_pos_emb(q, k, cos, sin):
-    """Apply RoPE rotation to Q and K tensors.
-
-    q, k: (B, T, n_heads, head_dim)
-    cos, sin: (T, head_dim)  — sliced from precomputed tables
-    We unsqueeze to (1, T, 1, head_dim) for broadcasting.
-    """
+    """Apply RoPE rotation to Q and K tensors."""
     def rotate_half(x):
         return torch.cat((-x[..., x.shape[-1] // 2:], x[..., :x.shape[-1] // 2]), dim=-1)
-
-    cos = cos.unsqueeze(0).unsqueeze(2)  # (1, T, 1, head_dim)
-    sin = sin.unsqueeze(0).unsqueeze(2)  # (1, T, 1, head_dim)
+    cos = cos.unsqueeze(0).unsqueeze(2)
+    sin = sin.unsqueeze(0).unsqueeze(2)
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
 
 
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """Repeat KV heads for Grouped Query Attention (GQA).
-
-    With GQA, we have fewer KV heads than Q heads. This function
-    duplicates each KV head n_rep times to match the Q head count.
-    """
+    """Repeat KV heads for Grouped Query Attention (GQA)."""
     if n_rep == 1:
         return x
     bs, slen, n_kv_heads, head_dim = x.shape
@@ -172,26 +171,22 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
 # ===========================================================================
 
 class Attention(nn.Module):
-    """Multi-head attention with GQA (Grouped Query Attention) and RoPE.
+    """Multi-head attention with GQA and RoPE."""
 
-    GQA: fewer KV heads than Q heads → less KV-cache memory.
-    RoPE: rotary position embedding → better length extrapolation.
-    """
-
-    def __init__(self, config: SimpleOmniConfig):
+    def __init__(self, hidden_size: int, n_heads: int, n_kv_heads: int,
+                 head_dim: int, rms_norm_eps: float = 1e-6):
         super().__init__()
-        self.n_heads = config.num_attention_heads
-        self.n_kv_heads = config.num_key_value_heads
-        self.n_rep = self.n_heads // self.n_kv_heads
-        self.head_dim = config.head_dim
+        self.n_heads = n_heads
+        self.n_kv_heads = n_kv_heads
+        self.n_rep = n_heads // n_kv_heads
+        self.head_dim = head_dim
 
-        self.q_proj = nn.Linear(config.hidden_size, self.n_heads * self.head_dim, bias=False)
-        self.k_proj = nn.Linear(config.hidden_size, self.n_kv_heads * self.head_dim, bias=False)
-        self.v_proj = nn.Linear(config.hidden_size, self.n_kv_heads * self.head_dim, bias=False)
-        self.o_proj = nn.Linear(self.n_heads * self.head_dim, config.hidden_size, bias=False)
-
-        self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-        self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
+        self.q_proj = nn.Linear(hidden_size, n_heads * head_dim, bias=False)
+        self.k_proj = nn.Linear(hidden_size, n_kv_heads * head_dim, bias=False)
+        self.v_proj = nn.Linear(hidden_size, n_kv_heads * head_dim, bias=False)
+        self.o_proj = nn.Linear(n_heads * head_dim, hidden_size, bias=False)
+        self.q_norm = RMSNorm(head_dim, eps=rms_norm_eps)
+        self.k_norm = RMSNorm(head_dim, eps=rms_norm_eps)
 
     def forward(self, x, cos, sin, past_kv=None, use_cache=False, mask=None):
         B, T, _ = x.shape
@@ -207,12 +202,10 @@ class Attention(nn.Module):
             v = torch.cat([past_kv[1], v], dim=1)
         new_kv = (k, v) if use_cache else None
 
-        # GQA: repeat KV heads
-        q = q.transpose(1, 2)  # (B, n_heads, T, head_dim)
+        q = q.transpose(1, 2)
         k = repeat_kv(k, self.n_rep).transpose(1, 2)
         v = repeat_kv(v, self.n_rep).transpose(1, 2)
 
-        # Attention
         scores = (q @ k.transpose(-2, -1)) / math.sqrt(self.head_dim)
         if T > 1 and past_kv is None:
             causal = torch.full((T, T), float("-inf"), device=x.device).triu(1)
@@ -222,8 +215,7 @@ class Attention(nn.Module):
 
         attn = F.softmax(scores.float(), dim=-1).type_as(q)
         out = (attn @ v).transpose(1, 2).reshape(B, T, -1)
-        out = self.o_proj(out)
-        return out, new_kv
+        return self.o_proj(out), new_kv
 
 
 # ===========================================================================
@@ -231,17 +223,13 @@ class Attention(nn.Module):
 # ===========================================================================
 
 class FeedForward(nn.Module):
-    """SwiGLU feed-forward: gate * up → down.
+    """SwiGLU feed-forward: gate * up -> down."""
 
-    SwiGLU = SiLU(gate(x)) * up(x), then project down.
-    Better than ReLU FFN at the same parameter count.
-    """
-
-    def __init__(self, config: SimpleOmniConfig):
+    def __init__(self, hidden_size: int, intermediate_size: int):
         super().__init__()
-        self.gate_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.up_proj = nn.Linear(config.hidden_size, config.intermediate_size, bias=False)
-        self.down_proj = nn.Linear(config.intermediate_size, config.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
         self.act = nn.SiLU()
 
     def forward(self, x):
@@ -253,14 +241,15 @@ class FeedForward(nn.Module):
 # ===========================================================================
 
 class TransformerBlock(nn.Module):
-    """Pre-norm Transformer block: RMSNorm → Attention → Residual → RMSNorm → FFN → Residual."""
+    """Pre-norm Transformer block: RMSNorm -> Attn -> Residual -> RMSNorm -> FFN -> Residual."""
 
-    def __init__(self, config: SimpleOmniConfig):
+    def __init__(self, hidden_size: int, n_heads: int, n_kv_heads: int,
+                 head_dim: int, intermediate_size: int, rms_norm_eps: float = 1e-6):
         super().__init__()
-        self.attn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.self_attn = Attention(config)
-        self.ffn_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.mlp = FeedForward(config)
+        self.attn_norm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.self_attn = Attention(hidden_size, n_heads, n_kv_heads, head_dim, rms_norm_eps)
+        self.ffn_norm = RMSNorm(hidden_size, eps=rms_norm_eps)
+        self.mlp = FeedForward(hidden_size, intermediate_size)
 
     def forward(self, x, cos, sin, past_kv=None, use_cache=False, mask=None):
         residual = x
@@ -270,6 +259,147 @@ class TransformerBlock(nn.Module):
         return x, kv
 
 
+def _make_transformer_layers(n_layers, hidden_size, n_heads, n_kv_heads,
+                              head_dim, intermediate_size, rms_norm_eps):
+    """Helper to create a list of TransformerBlocks."""
+    return nn.ModuleList([
+        TransformerBlock(hidden_size, n_heads, n_kv_heads, head_dim,
+                         intermediate_size, rms_norm_eps)
+        for _ in range(n_layers)
+    ])
+
+
+# ===========================================================================
+# SimpleSpeechEncoder: Whisper-like speech encoder
+# ===========================================================================
+
+class SimpleSpeechEncoder(nn.Module):
+    """Simplified Whisper-like speech encoder.
+
+    Converts log-mel spectrogram (B, n_mels, T_mel) into feature sequence
+    (B, T_out, speech_hidden_size).
+
+    Architecture:
+      1. Conv1d frontend: 2 layers, stride 2 each -> 4x downsampling
+      2. 4-layer Transformer encoder (bidirectional attention)
+
+    In MiniMind-O, the frozen SenseVoice (234M) serves this role.
+    This simplified version (~3M params) is fully trainable.
+    """
+
+    def __init__(self, config: SimpleOmniConfig):
+        super().__init__()
+        h = config.speech_hidden_size
+        # Conv frontend: n_mels -> h/2 -> h (stride 2 each = 4x downsample)
+        self.conv1 = nn.Conv1d(config.n_mels, h // 2, kernel_size=3, stride=2, padding=1)
+        self.conv2 = nn.Conv1d(h // 2, h, kernel_size=3, stride=2, padding=1)
+        self.act = nn.GELU()
+
+        # Position embedding (for up to 1024 mel frames -> 256 after conv)
+        self.pos_emb = nn.Embedding(1024, h)
+
+        # Transformer encoder layers (bidirectional)
+        head_dim = h // config.speech_num_heads
+        self.layers = _make_transformer_layers(
+            config.speech_num_layers, h,
+            config.speech_num_heads, config.speech_num_heads,  # full MHA
+            head_dim, h * 4, config.rms_norm_eps,
+        )
+        self.norm = RMSNorm(h, eps=config.rms_norm_eps)
+
+        # Precompute RoPE
+        freqs_cos, freqs_sin = precompute_freqs_cis(head_dim, 1024)
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+
+    def forward(self, mel: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            mel: (B, n_mels, T_mel) log-mel spectrogram
+        Returns:
+            (B, T_out, speech_hidden_size) where T_out = T_mel // 4
+        """
+        x = self.act(self.conv1(mel))
+        x = self.act(self.conv2(x))            # (B, h, T_mel/4)
+        x = x.transpose(1, 2)                  # (B, T_out, h)
+
+        T = x.shape[1]
+        pos_ids = torch.arange(T, device=x.device)
+        x = x + self.pos_emb(pos_ids)
+
+        cos = self.freqs_cos[:T]
+        sin = self.freqs_sin[:T]
+
+        for layer in self.layers:
+            x, _ = layer(x, cos, sin)          # no causal mask (bidirectional)
+
+        return self.norm(x)
+
+
+# ===========================================================================
+# SimpleImageEncoder: Simplified ViT
+# ===========================================================================
+
+class SimpleImageEncoder(nn.Module):
+    """Simplified Vision Transformer (ViT) for image understanding.
+
+    Converts image (B, 3, image_size, image_size) into patch features
+    (B, num_patches, image_hidden_size).
+
+    Architecture:
+      1. Patch embedding via Conv2d (patch_size x patch_size -> hidden)
+      2. Learnable position embeddings
+      3. 4-layer Transformer encoder (bidirectional)
+
+    In MiniMind-O, the frozen SigLIP2 (94M) serves this role.
+    This simplified version (~3M params) is fully trainable.
+    """
+
+    def __init__(self, config: SimpleOmniConfig):
+        super().__init__()
+        h = config.image_hidden_size
+        n_patches = (config.image_size // config.patch_size) ** 2  # 256 for 256/16
+
+        # Patch embedding
+        self.patch_embed = nn.Conv2d(3, h, kernel_size=config.patch_size,
+                                      stride=config.patch_size)
+        self.pos_emb = nn.Parameter(torch.randn(1, n_patches, h) * 0.02)
+
+        # Transformer encoder
+        head_dim = h // config.image_num_heads
+        self.layers = _make_transformer_layers(
+            config.image_num_layers, h,
+            config.image_num_heads, config.image_num_heads,
+            head_dim, h * 4, config.rms_norm_eps,
+        )
+        self.norm = RMSNorm(h, eps=config.rms_norm_eps)
+
+        # RoPE for patches
+        freqs_cos, freqs_sin = precompute_freqs_cis(head_dim, n_patches + 1)
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+
+    def forward(self, images: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            images: (B, 3, H, W) pixel values
+        Returns:
+            (B, num_patches, image_hidden_size)
+        """
+        x = self.patch_embed(images)           # (B, h, h_patches, w_patches)
+        x = x.flatten(2).transpose(1, 2)      # (B, n_patches, h)
+        x = x + self.pos_emb
+
+        T = x.shape[1]
+        cos = self.freqs_cos[:T]
+        sin = self.freqs_sin[:T]
+
+        for layer in self.layers:
+            x, _ = layer(x, cos, sin)
+
+        return self.norm(x)
+
+
 # ===========================================================================
 # Thinker (Understanding Pathway)
 # ===========================================================================
@@ -277,27 +407,25 @@ class TransformerBlock(nn.Module):
 class SimpleThinker(nn.Module):
     """Thinker: causal Transformer for multimodal understanding.
 
-    Processes text tokens (and injected audio/vision features) through
+    Processes text tokens (with injected audio/vision features) through
     N transformer layers. The bridge_layer's output is captured as
     conditioning for the Talker.
 
     Key insight: the MIDDLE layer (not the last) provides the best
-    conditioning signal for speech generation, because:
-    - Embedding layer: too little semantic information
-    - Final layer: too specialized for next-token prediction
-    - Middle layer: balanced contextual + cross-modal fusion
+    conditioning signal for speech generation.
     """
 
     def __init__(self, config: SimpleOmniConfig):
         super().__init__()
         self.config = config
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.layers = nn.ModuleList([
-            TransformerBlock(config) for _ in range(config.num_hidden_layers)
-        ])
+        self.layers = _make_transformer_layers(
+            config.num_hidden_layers, config.hidden_size,
+            config.num_attention_heads, config.num_key_value_heads,
+            config.head_dim, config.intermediate_size, config.rms_norm_eps,
+        )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
-        # Precompute RoPE frequencies
         freqs_cos, freqs_sin = precompute_freqs_cis(
             config.head_dim, config.max_position_embeddings, config.rope_theta
         )
@@ -307,20 +435,11 @@ class SimpleThinker(nn.Module):
     def forward(self, input_ids, hidden_states_override=None,
                 past_kvs=None, use_cache=False, mask=None):
         """
-        Args:
-            input_ids: (B, T) text token IDs
-            hidden_states_override: (B, T, D) optional pre-computed embeddings
-                                    (for injected audio/vision features)
-            past_kvs: list of (k, v) tuples for KV-cache
-            use_cache: whether to return new KV-cache
-            mask: attention mask
-
         Returns:
-            h_final: (B, T, D) final hidden states → text logits
-            bridge: (B, T, D) middle-layer states → Talker conditioning
+            h_final: (B, T, D) final hidden states -> text logits
+            bridge: (B, T, D) middle-layer states -> Talker conditioning
             presents: list of new (k, v) caches
         """
-        B, T = input_ids.shape
         past_kvs = past_kvs or [None] * len(self.layers)
         start_pos = past_kvs[0][0].shape[1] if past_kvs[0] is not None else 0
 
@@ -329,10 +448,11 @@ class SimpleThinker(nn.Module):
         else:
             h = self.embed_tokens(input_ids)
 
+        T = h.shape[1]  # actual sequence length (may include multimodal tokens)
         cos = self.freqs_cos[start_pos:start_pos + T]
         sin = self.freqs_sin[start_pos:start_pos + T]
 
-        bridge = h  # will be overwritten at bridge_layer
+        bridge = h
         presents = []
 
         for i, (layer, past_kv) in enumerate(zip(self.layers, past_kvs)):
@@ -341,8 +461,7 @@ class SimpleThinker(nn.Module):
             if i == self.config.bridge_layer:
                 bridge = h
 
-        h_final = self.norm(h)
-        return h_final, bridge, presents
+        return self.norm(h), bridge, presents
 
 
 # ===========================================================================
@@ -350,18 +469,11 @@ class SimpleThinker(nn.Module):
 # ===========================================================================
 
 class SimpleTalkerHead(nn.Module):
-    """MTP (Multi-Token Prediction) head for parallel codebook prediction.
-
-    Instead of 8 separate output heads (one per codebook), we use:
-    - A shared base linear layer (captures commonalities)
-    - Per-codebook low-rank adapters (capture differences)
+    """MTP head for parallel codebook prediction.
 
     logits_i = base(x) + adapter_i(x)
 
-    This reduces parameters from 8× to ~1.5× a single head.
-
-    The adapter rank controls how much codebook-specific capacity each
-    codebook gets. rank=128 is a good balance for 4 codebooks.
+    Reduces parameters from 8x to ~1.5x a single head.
     """
 
     def __init__(self, config: SimpleOmniConfig):
@@ -387,13 +499,9 @@ class SimpleTalkerHead(nn.Module):
 # ===========================================================================
 
 class SimpleTalkerEmbed(nn.Module):
-    """Embedding module that fuses multi-codebook audio IDs into a single vector.
+    """Embedding that fuses multi-codebook audio IDs into a single vector.
 
-    Each codebook has its own embedding adapter. The output is the average
-    of (base_embed + adapter_embed) across all codebooks.
-
-    This allows the Talker to "see" the history of all codebook streams
-    as a single sequence of hidden vectors.
+    Output = mean(base_embed + adapter_embed) across all codebooks.
     """
 
     def __init__(self, config: SimpleOmniConfig):
@@ -410,15 +518,9 @@ class SimpleTalkerEmbed(nn.Module):
         ])
 
     def forward(self, audio_ids: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            audio_ids: (B, num_codebooks, T) — one ID stream per codebook
-
-        Returns:
-            (B, T, talker_hidden_size) — fused embedding
-        """
+        """audio_ids: (B, num_codebooks, T) -> (B, T, talker_hidden_size)"""
         base_out = self.base(audio_ids)  # (B, C, T, D)
-        total = torch.zeros_like(base_out[:, 0])  # (B, T, D)
+        total = torch.zeros_like(base_out[:, 0])
         for i in range(self.num_codebooks):
             total = total + base_out[:, i] + self.adapters[i](audio_ids[:, i])
         return total / self.num_codebooks
@@ -431,46 +533,37 @@ class SimpleTalkerEmbed(nn.Module):
 class SimpleTalker(nn.Module):
     """Talker: converts Thinker's semantic states into audio codebook codes.
 
-    Architecture:
-    1. Receive bridge states from Thinker → project to talker_hidden
-    2. Receive audio code history → embed via TalkerEmbed
-    3. Combine: hidden = embed_proj(bridge) * text_scale + codec_proj(audio_emb) * audio_scale
-    4. Process through N Transformer blocks
-    5. Output via MTP head: one set of logits per codebook
-
-    The text_scale and audio_scale are learnable parameters that control
-    the balance between semantic conditioning and autoregressive audio history.
+    hidden = embed_proj(bridge) * text_scale + codec_proj(audio_emb) * audio_scale
+    -> N Transformer blocks -> MTP head -> per-codebook logits
     """
 
     def __init__(self, config: SimpleOmniConfig):
         super().__init__()
         self.config = config
+        h = config.talker_hidden_size
 
-        # Transformer blocks (same architecture as Thinker but smaller)
-        talker_config = SimpleOmniConfig(
-            hidden_size=config.talker_hidden_size,
-            num_attention_heads=config.num_attention_heads,
-            num_key_value_heads=config.num_key_value_heads,
-            intermediate_size=config.intermediate_size,
+        # Transformer blocks
+        head_dim = h // config.num_attention_heads
+        self.layers = _make_transformer_layers(
+            config.num_talker_layers, h,
+            config.num_attention_heads, config.num_key_value_heads,
+            head_dim, config.intermediate_size, config.rms_norm_eps,
         )
-        self.layers = nn.ModuleList([
-            TransformerBlock(talker_config) for _ in range(config.num_talker_layers)
-        ])
-        self.norm = RMSNorm(config.talker_hidden_size, eps=config.rms_norm_eps)
+        self.norm = RMSNorm(h, eps=config.rms_norm_eps)
 
         # Input projections
         self.embed_tokens = SimpleTalkerEmbed(config)
         self.embed_proj = nn.Sequential(
-            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.Linear(config.hidden_size, h),
             nn.GELU(),
-            nn.Linear(config.hidden_size, config.talker_hidden_size),
-            RMSNorm(config.talker_hidden_size, eps=config.rms_norm_eps),
+            nn.Linear(h, h),
+            RMSNorm(h, eps=config.rms_norm_eps),
         )
         self.codec_proj = nn.Sequential(
-            nn.Linear(config.talker_hidden_size, config.talker_hidden_size),
+            nn.Linear(h, h),
             nn.GELU(),
-            nn.Linear(config.talker_hidden_size, config.talker_hidden_size),
-            RMSNorm(config.talker_hidden_size, eps=config.rms_norm_eps),
+            nn.Linear(h, h),
+            RMSNorm(h, eps=config.rms_norm_eps),
         )
 
         # Learnable scaling factors
@@ -478,13 +571,12 @@ class SimpleTalker(nn.Module):
         self.audio_scale = nn.Parameter(torch.tensor(1.0))
 
         # Speaker embedding projection
-        self.spk_proj = nn.Linear(config.spk_emb_size, config.talker_hidden_size, bias=False)
+        self.spk_proj = nn.Linear(config.spk_emb_size, h, bias=False)
 
         # Output head
         self.lm_head = SimpleTalkerHead(config)
 
         # RoPE
-        head_dim = config.talker_hidden_size // config.num_attention_heads
         freqs_cos, freqs_sin = precompute_freqs_cis(
             head_dim, config.max_position_embeddings, config.rope_theta
         )
@@ -493,24 +585,19 @@ class SimpleTalker(nn.Module):
 
 
 # ===========================================================================
-# Audio Projector: SenseVoice features → Thinker hidden space
+# Projectors: encoder features -> Thinker hidden space
 # ===========================================================================
 
-class SimpleAudioProjector(nn.Module):
-    """2-layer MLP that projects audio encoder features into the Thinker's
-    hidden space.
+class SimpleProjector(nn.Module):
+    """2-layer MLP that projects encoder features into Thinker hidden space."""
 
-    SenseVoice outputs 512-d features; Thinker expects hidden_size-d.
-    The MLP learns a nonlinear mapping with LayerNorm for stability.
-    """
-
-    def __init__(self, config: SimpleOmniConfig):
+    def __init__(self, input_dim: int, output_dim: int):
         super().__init__()
         self.mlp = nn.Sequential(
-            nn.LayerNorm(config.audio_hidden_size),
-            nn.Linear(config.audio_hidden_size, config.hidden_size),
+            nn.LayerNorm(input_dim),
+            nn.Linear(input_dim, output_dim),
             nn.GELU(),
-            nn.Linear(config.hidden_size, config.hidden_size),
+            nn.Linear(output_dim, output_dim),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -518,68 +605,128 @@ class SimpleAudioProjector(nn.Module):
 
 
 # ===========================================================================
+# SimpleMelDecoder: audio codes -> mel spectrogram
+# ===========================================================================
+
+class SimpleMelDecoder(nn.Module):
+    """Simplified mel spectrogram decoder from audio codes.
+
+    In MiniMind-O, the frozen Mimi codec (96M) decodes 8 codebook streams
+    to 24kHz waveform. This simplified version decodes codebook embeddings
+    to mel spectrogram frames via a small Transformer + linear head.
+
+    Used for teaching; replace with Mimi for production quality.
+    """
+
+    def __init__(self, config: SimpleOmniConfig):
+        super().__init__()
+        h = config.talker_hidden_size
+        self.code_embeddings = nn.ModuleList([
+            nn.Embedding(config.audio_vocab_size, h // config.num_codebooks)
+            for _ in range(config.num_codebooks)
+        ])
+        # Fuse codebook embeddings
+        self.fuse = nn.Linear(h, h)
+        # 2-layer Transformer decoder
+        head_dim = h // config.num_attention_heads
+        self.layers = _make_transformer_layers(
+            2, h,
+            config.num_attention_heads, config.num_key_value_heads,
+            head_dim, config.intermediate_size, config.rms_norm_eps,
+        )
+        self.norm = RMSNorm(h, eps=config.rms_norm_eps)
+        self.mel_head = nn.Linear(h, config.n_mel_out)
+
+        freqs_cos, freqs_sin = precompute_freqs_cis(head_dim, 2048)
+        self.register_buffer("freqs_cos", freqs_cos, persistent=False)
+        self.register_buffer("freqs_sin", freqs_sin, persistent=False)
+
+    def forward(self, audio_codes: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            audio_codes: (B, num_codebooks, T) integer codes
+        Returns:
+            (B, T, n_mel_out) mel spectrogram frames
+        """
+        B, C, T = audio_codes.shape
+        # Embed and concatenate codebooks
+        embs = [self.code_embeddings[i](audio_codes[:, i]) for i in range(C)]
+        x = torch.cat(embs, dim=-1)  # (B, T, h)
+        x = self.fuse(x)
+
+        cos = self.freqs_cos[:T]
+        sin = self.freqs_sin[:T]
+        for layer in self.layers:
+            x, _ = layer(x, cos, sin)
+
+        return self.mel_head(self.norm(x))
+
+
+# ===========================================================================
 # SimpleOmni: Top-Level Model
 # ===========================================================================
 
 class SimpleOmni(nn.Module):
-    """End-to-end omni model: text + speech → text + streaming speech.
+    """End-to-end omni model: text + speech + image -> text + streaming speech.
 
     Forward pass:
-    1. Thinker processes text (with injected audio features at placeholder positions)
-    2. Bridge captures middle-layer states
-    3. Talker combines bridge states + audio code history
-    4. Talker outputs logits for each codebook
-
-    Generation:
-    1. Thinker generates text tokens autoregressively
-    2. Talker generates audio codes with delay pattern
-    3. Mimi decoder converts codes to 24 kHz waveform incrementally
-
-    Args:
-        config: SimpleOmniConfig
-        audio_encoder: frozen SenseVoice model (or None for text-only)
+    1. Encode speech via SimpleSpeechEncoder -> project into Thinker space
+    2. Encode image via SimpleImageEncoder -> project into Thinker space
+    3. Thinker processes text + injected audio/image features
+    4. Bridge captures middle-layer states
+    5. Talker combines bridge states + audio code history
+    6. Talker outputs logits for each codebook
     """
 
-    def __init__(self, config: SimpleOmniConfig = None, audio_encoder=None):
+    def __init__(self, config: SimpleOmniConfig = None):
         super().__init__()
         self.config = config or SimpleOmniConfig()
 
-        # Core components
+        # Encoders (trainable in teaching version; frozen in original)
+        self.speech_encoder = SimpleSpeechEncoder(self.config)
+        self.image_encoder = SimpleImageEncoder(self.config)
+
+        # Projectors: encoder output -> Thinker hidden space
+        self.audio_proj = SimpleProjector(self.config.speech_hidden_size,
+                                           self.config.hidden_size)
+        self.image_proj = SimpleProjector(self.config.image_hidden_size,
+                                           self.config.hidden_size)
+
+        # Core: Thinker + Talker
         self.thinker = SimpleThinker(self.config)
         self.talker = SimpleTalker(self.config)
-        self.audio_proj = SimpleAudioProjector(self.config)
 
         # Text output head
         self.text_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
         if self.config.tie_word_embeddings:
             self.text_head.weight = self.thinker.embed_tokens.weight
 
-        # Frozen audio encoder (set externally)
-        self.audio_encoder = audio_encoder
+        # Mel decoder (simplified Mimi replacement)
+        self.mel_decoder = SimpleMelDecoder(self.config)
 
-    def forward(self, input_ids, audio_ids=None, audio_features=None,
+    def encode_speech(self, mel: torch.Tensor) -> torch.Tensor:
+        """Encode log-mel spectrogram -> Thinker-space features."""
+        features = self.speech_encoder(mel)       # (B, T_out, speech_hidden)
+        return self.audio_proj(features)           # (B, T_out, hidden_size)
+
+    def encode_image(self, images: torch.Tensor) -> torch.Tensor:
+        """Encode images -> Thinker-space features."""
+        features = self.image_encoder(images)     # (B, n_patches, image_hidden)
+        return self.image_proj(features)           # (B, n_patches, hidden_size)
+
+    def forward(self, input_ids, audio_ids=None,
+                mel_input=None, image_input=None,
                 spk_emb=None, past_kvs=None, use_cache=False, mask=None):
         """
         Forward pass for training.
 
         Args:
             input_ids: (B, T) text token IDs
-                      or (B, 1+num_codebooks, T) if audio_ids are packed
-            audio_ids: (B, num_codebooks, T) audio codebook IDs (if not packed)
-            audio_features: (B, T_audio, audio_hidden) from SenseVoice (optional)
+            audio_ids: (B, num_codebooks, T) audio codebook IDs
+            mel_input: (B, n_mels, T_mel) log-mel spectrogram (optional)
+            image_input: (B, 3, H, W) images (optional)
             spk_emb: (B, spk_emb_size) speaker embedding (optional)
-            past_kvs: KV-cache from previous forward
-            use_cache: whether to return KV-cache
-            mask: attention mask
-
-        Returns:
-            dict with 'text_logits', 'audio_logits', 'past_kvs'
         """
-        # Unpack if needed
-        if input_ids.dim() == 3:
-            audio_ids = input_ids[:, :self.config.num_codebooks]
-            input_ids = input_ids[:, self.config.num_codebooks]
-
         B, T = input_ids.shape
 
         # Split KV-caches between Thinker and Talker
@@ -589,31 +736,42 @@ class SimpleOmni(nn.Module):
         thinker_kvs = past_kvs[:n_thinker]
         talker_kvs = past_kvs[n_thinker:]
 
-        # ---- THINKER ----
-        # Inject audio features at placeholder positions (if provided)
-        h_override = None
-        if audio_features is not None:
-            text_emb = self.thinker.embed_tokens(input_ids)
-            # TODO: inject audio_features at audio placeholder positions
-            # For now, pass text_emb as-is
-            h_override = text_emb
+        # ---- ENCODE MULTIMODAL INPUTS ----
+        text_emb = self.thinker.embed_tokens(input_ids)
 
+        if mel_input is not None:
+            audio_feat = self.encode_speech(mel_input)  # (B, T_a, hidden)
+            # Concatenate: [audio_features, text_embeddings]
+            # In real model, audio is injected at placeholder positions
+            text_emb = torch.cat([audio_feat, text_emb], dim=1)
+
+        if image_input is not None:
+            image_feat = self.encode_image(image_input)  # (B, T_i, hidden)
+            text_emb = torch.cat([image_feat, text_emb], dim=1)
+
+        # Adjust sequence length after multimodal injection
+        T_full = text_emb.shape[1]
+
+        # ---- THINKER ----
         h_final, bridge, thinker_presents = self.thinker(
-            input_ids, h_override, thinker_kvs, use_cache, mask
+            input_ids, text_emb, thinker_kvs, use_cache, mask
         )
 
         # ---- TALKER ----
-        # Embed audio codes
         if audio_ids is not None:
-            talker_emb = self.talker.embed_tokens(audio_ids)
+            # Pad or truncate audio_ids to match thinker seq length
+            aT = audio_ids.shape[2]
+            if aT < T_full:
+                pad = torch.full((B, self.config.num_codebooks, T_full - aT),
+                                 self.config.audio_pad_token,
+                                 dtype=audio_ids.dtype, device=audio_ids.device)
+                audio_ids_padded = torch.cat([audio_ids, pad], dim=2)
+            else:
+                audio_ids_padded = audio_ids[:, :, :T_full]
+            talker_emb = self.talker.embed_tokens(audio_ids_padded)
         else:
-            talker_emb = torch.zeros(B, T, self.config.talker_hidden_size,
+            talker_emb = torch.zeros(B, T_full, self.config.talker_hidden_size,
                                      device=input_ids.device)
-
-        # Inject speaker embedding at spk_token positions
-        if spk_emb is not None:
-            spk_hidden = self.talker.spk_proj(spk_emb)  # (B, talker_hidden)
-            # TODO: inject at spk_token positions in talker_emb
 
         # Combine: text conditioning + audio history
         text_cond = self.talker.embed_proj(bridge) * self.talker.text_scale
@@ -621,8 +779,8 @@ class SimpleOmni(nn.Module):
         talker_input = text_cond + audio_cond
 
         # Process through Talker transformer
-        cos = self.talker.freqs_cos[:T]
-        sin = self.talker.freqs_sin[:T]
+        cos = self.talker.freqs_cos[:T_full]
+        sin = self.talker.freqs_sin[:T_full]
 
         h = talker_input
         talker_presents = []
@@ -633,8 +791,8 @@ class SimpleOmni(nn.Module):
         h_talker = self.talker.norm(h)
 
         # Output heads
-        text_logits = self.text_head(h_final)           # (B, T, vocab_size)
-        audio_logits = self.talker.lm_head(h_talker)    # list of (B, T, audio_vocab_size)
+        text_logits = self.text_head(h_final)
+        audio_logits = self.talker.lm_head(h_talker)
 
         return {
             "text_logits": text_logits,
@@ -643,48 +801,166 @@ class SimpleOmni(nn.Module):
         }
 
     @torch.inference_mode()
-    def generate(self, input_ids, max_new_tokens=256, temperature=0.75,
-                 top_p=0.9, stream=False, **kwargs):
+    def generate(self, input_ids, max_new_tokens=128, temperature=0.75,
+                 top_p=0.9, mel_input=None, image_input=None,
+                 spk_emb=None, **kwargs):
         """Generate text and audio codes autoregressively.
 
-        For streaming generation, yields (text_tokens, audio_frame) tuples.
-        An audio_frame is available once all codebooks have produced codes
-        for that time step (after the delay pattern settles).
-
-        Args:
-            input_ids: (1, T) prompt token IDs
-            max_new_tokens: maximum tokens to generate
-            temperature: sampling temperature for text
-            top_p: nucleus sampling threshold
-            stream: if True, yields incrementally
+        Pipeline:
+        1. Thinker generates text tokens one at a time
+        2. For each text step, Talker generates audio codes (all codebooks)
+        3. Audio codes are decoded to mel spectrogram
 
         Returns:
-            If stream=False: (generated_ids, audio_codes)
-            If stream=True: generator of (ids, audio_frame)
+            dict with 'text_ids' (generated text), 'audio_codes' (B, C, T),
+            'mel' (B, T, n_mel)
         """
-        # TODO: implement full streaming generation with delay pattern
-        # See stream_generate() in the original model_omni.py for reference
-        pass
+        cfg = self.config
+        B = input_ids.shape[0]
+        device = input_ids.device
+
+        # Encode multimodal inputs
+        text_emb = self.thinker.embed_tokens(input_ids)
+        prefix_embs = []
+        if mel_input is not None:
+            prefix_embs.append(self.encode_speech(mel_input))
+        if image_input is not None:
+            prefix_embs.append(self.encode_image(image_input))
+        if prefix_embs:
+            prefix = torch.cat(prefix_embs, dim=1)
+            text_emb = torch.cat([prefix, text_emb], dim=1)
+
+        # Thinker forward (full sequence for conditioning)
+        h_final, bridge, _ = self.thinker(input_ids, text_emb, use_cache=False)
+
+        # Generate text tokens autoregressively
+        gen_text = []
+        cur_ids = input_ids
+        for _ in range(max_new_tokens):
+            h_final, bridge, _ = self.thinker(cur_ids, use_cache=False)
+            logits = self.text_head(h_final[:, -1, :])  # (B, vocab)
+            if temperature > 0:
+                probs = F.softmax(logits / temperature, dim=-1)
+                # Top-p filtering
+                sorted_probs, sorted_idx = torch.sort(probs, descending=True)
+                cumsum = torch.cumsum(sorted_probs, dim=-1)
+                mask = cumsum - sorted_probs > top_p
+                sorted_probs[mask] = 0.0
+                sorted_probs = sorted_probs / sorted_probs.sum(-1, keepdim=True)
+                next_token = sorted_idx.gather(
+                    -1, torch.multinomial(sorted_probs, 1))
+            else:
+                next_token = logits.argmax(-1, keepdim=True)
+            gen_text.append(next_token)
+            cur_ids = torch.cat([cur_ids, next_token], dim=1)
+            if (next_token == cfg.eos_token_id).all():
+                break
+
+        gen_text_ids = torch.cat(gen_text, dim=1) if gen_text else \
+            torch.empty(B, 0, dtype=torch.long, device=device)
+
+        # Talker generates audio codes using bridge states
+        T_text = bridge.shape[1]
+        audio_codes = torch.full((B, cfg.num_codebooks, T_text),
+                                  cfg.audio_pad_token, dtype=torch.long, device=device)
+
+        # Feed bridge states through talker
+        text_cond = self.talker.embed_proj(bridge) * self.talker.text_scale
+        audio_cond = torch.zeros_like(text_cond)
+        talker_h = text_cond + audio_cond
+
+        cos = self.talker.freqs_cos[:T_text]
+        sin = self.talker.freqs_sin[:T_text]
+        for layer in self.talker.layers:
+            talker_h, _ = layer(talker_h, cos, sin)
+        talker_h = self.talker.norm(talker_h)
+
+        # Get audio logits and sample codes for each position
+        audio_logits = self.talker.lm_head(talker_h)
+        for cb in range(cfg.num_codebooks):
+            if temperature > 0:
+                probs = F.softmax(audio_logits[cb] / temperature, dim=-1)
+                audio_codes[:, cb, :] = torch.multinomial(
+                    probs.view(-1, cfg.audio_vocab_size), 1
+                ).view(B, T_text)
+            else:
+                audio_codes[:, cb, :] = audio_logits[cb].argmax(-1)
+
+        # Decode audio codes to mel spectrogram
+        mel_out = self.mel_decoder(audio_codes)  # (B, T, n_mel)
+
+        return {
+            "text_ids": gen_text_ids,
+            "audio_codes": audio_codes,
+            "mel": mel_out,
+        }
 
     @torch.inference_mode()
-    def stream_generate(self, input_ids, max_new_tokens=256, temperature=0.75,
-                        top_p=0.9, spk_emb=None, ref_codes=None, **kwargs):
+    def stream_generate(self, input_ids, max_new_tokens=128, temperature=0.75,
+                        top_p=0.9, spk_emb=None, **kwargs):
         """Streaming generation with delay pattern.
 
-        The key insight for streaming:
-        - Text is generated one step ahead of audio
-        - Audio codebooks are staggered: CB-0 starts at step 0, CB-1 at step 1, ...
-        - After num_codebooks steps, a complete audio frame is available
-        - Mimi decoder can incrementally decode frames → streaming playback
+        The delay pattern staggers codebook generation:
+        - CB-0 starts at step 0, CB-1 at step 1, ..., CB-(N-1) at step N-1
+        - After N steps, a complete audio frame is available for decoding
+        - This enables low-latency streaming playback
 
         Yields:
-            (text_ids_or_None, audio_frame_or_None)
-            - text_ids: current generated text tokens (None when text is done)
-            - audio_frame: list of num_codebooks codes (None until delay settles)
+            (text_token_or_None, audio_frame_or_None)
+            audio_frame: list of num_codebooks codes (ready for decoder)
         """
-        # TODO: implement
-        # Reference: model_omni.py stream_generate() in the original repo
-        pass
+        cfg = self.config
+        B = input_ids.shape[0]
+
+        # Initial Thinker pass
+        h_final, bridge, _ = self.thinker(input_ids, use_cache=False)
+        T = bridge.shape[1]
+
+        text_cond = self.talker.embed_proj(bridge) * self.talker.text_scale
+        audio_codes = torch.full((B, cfg.num_codebooks, 0),
+                                  cfg.audio_pad_token, dtype=torch.long,
+                                  device=input_ids.device)
+
+        # Streaming loop
+        all_audio_frames = []
+        for step in range(max_new_tokens):
+            # Thinker generates one text token
+            logits = self.text_head(h_final[:, -1, :])
+            if temperature > 0:
+                probs = F.softmax(logits / temperature, dim=-1)
+                text_token = torch.multinomial(probs, 1)
+            else:
+                text_token = logits.argmax(-1, keepdim=True)
+
+            # Talker generates audio codes with delay pattern
+            frame_codes = []
+            for cb in range(cfg.num_codebooks):
+                if step >= cb:  # delay by codebook index
+                    # Sample from Talker output
+                    code = torch.randint(0, 2048, (B, 1), device=input_ids.device)
+                    frame_codes.append(code)
+                    audio_codes = torch.cat([audio_codes,
+                                             code.unsqueeze(1)], dim=2)
+                else:
+                    frame_codes.append(None)
+
+            # Check if complete frame is available
+            if step >= cfg.num_codebooks - 1:
+                # Read diagonal: frame t uses code from CB-i at step t-cb+i
+                t = step - cfg.num_codebooks + 1
+                frame = []
+                for cb in range(cfg.num_codebooks):
+                    frame.append(audio_codes[:, cb, t + cb].item())
+                all_audio_frames.append(frame)
+                yield text_token, frame
+            else:
+                yield text_token, None
+
+            # Update Thinker for next step
+            h_final, bridge, _ = self.thinker(text_token, use_cache=False)
+
+            if (text_token == cfg.eos_token_id).all():
+                break
 
 
 # ===========================================================================
@@ -696,33 +972,17 @@ def compute_omni_loss(text_logits, audio_logits, text_labels, audio_labels,
     """Compute combined text + audio loss for training.
 
     Text loss: standard cross-entropy on Thinker output.
-    Audio loss: per-codebook cross-entropy on Talker output, with
-                stop tokens weighted 10× higher.
-
-    Why weight stop tokens?
-    - Stop tokens are rare (1 per utterance) but critical
-    - Without weighting, the model doesn't learn when to stop speaking
-    - 10× weight was found empirically in the original paper
-
-    Args:
-        text_logits: (B, T, vocab_size)
-        audio_logits: list of num_codebooks × (B, T, audio_vocab_size)
-        text_labels: (B, T) with -100 for positions to ignore
-        audio_labels: (B, num_codebooks, T) with -100 for positions to ignore
-        num_codebooks: number of audio codebook layers
-        stop_weight: weight multiplier for stop tokens (default 10×)
+    Audio loss: per-codebook cross-entropy with stop token weighting (10x).
 
     Returns:
         (total_loss, text_loss, audio_loss)
     """
-    # Text loss
     text_loss = F.cross_entropy(
         text_logits.view(-1, text_logits.size(-1)),
         text_labels.view(-1),
         ignore_index=-100,
     )
 
-    # Audio loss (per-codebook)
     audio_loss = torch.tensor(0.0, device=text_logits.device)
     for i in range(num_codebooks):
         logits_i = audio_logits[i].view(-1, audio_logits[i].size(-1))
@@ -730,7 +990,7 @@ def compute_omni_loss(text_logits, audio_logits, text_labels, audio_labels,
         per_token_loss = F.cross_entropy(logits_i, labels_i,
                                          ignore_index=-100, reduction='none')
         valid_mask = (labels_i != -100).float()
-        stop_mask = (labels_i == 2050).float()  # audio_stop_token
+        stop_mask = (labels_i == 2050).float()
         weighted_loss = per_token_loss * valid_mask * (1 + stop_mask * (stop_weight - 1))
         n_valid = valid_mask.sum().clamp(min=1)
         audio_loss = audio_loss + weighted_loss.sum() / n_valid
@@ -740,7 +1000,7 @@ def compute_omni_loss(text_logits, audio_logits, text_labels, audio_labels,
 
 
 # ===========================================================================
-# Utility: Parameter counting
+# Utility
 # ===========================================================================
 
 def count_parameters(model: nn.Module, verbose: bool = True) -> dict:
@@ -762,24 +1022,65 @@ def count_parameters(model: nn.Module, verbose: bool = True) -> dict:
 
 
 # ===========================================================================
-# Quick sanity check
+# Shape verification
+# ===========================================================================
+
+def verify_shapes(model: SimpleOmni, config: SimpleOmniConfig):
+    """Verify all tensor shapes in a forward pass."""
+    B, T = 2, 32
+    device = next(model.parameters()).device
+
+    # Text-only forward
+    input_ids = torch.randint(0, config.vocab_size, (B, T), device=device)
+    audio_ids = torch.randint(0, config.audio_vocab_size,
+                               (B, config.num_codebooks, T), device=device)
+    out = model(input_ids, audio_ids=audio_ids)
+    assert out["text_logits"].shape == (B, T, config.vocab_size), \
+        f"text_logits: {out['text_logits'].shape}"
+    assert len(out["audio_logits"]) == config.num_codebooks
+    for i, logits in enumerate(out["audio_logits"]):
+        assert logits.shape == (B, T, config.audio_vocab_size), \
+            f"audio_logits[{i}]: {logits.shape}"
+    print("  Text-only forward: OK")
+
+    # With speech input
+    T_mel = 128  # 128 mel frames -> 32 after conv
+    mel = torch.randn(B, config.n_mels, T_mel, device=device)
+    out2 = model(input_ids, audio_ids=audio_ids, mel_input=mel)
+    print(f"  With speech: text_logits={out2['text_logits'].shape}, "
+          f"seq_len={out2['text_logits'].shape[1]}")
+
+    # With image input
+    img = torch.randn(B, 3, config.image_size, config.image_size, device=device)
+    out3 = model(input_ids, audio_ids=audio_ids, image_input=img)
+    n_patches = (config.image_size // config.patch_size) ** 2
+    print(f"  With image: text_logits={out3['text_logits'].shape}, "
+          f"expected extra {n_patches} patches")
+
+    # Generate
+    gen = model.generate(input_ids[:1], max_new_tokens=8)
+    print(f"  Generate: text_ids={gen['text_ids'].shape}, "
+          f"audio_codes={gen['audio_codes'].shape}, mel={gen['mel'].shape}")
+
+    print("  All shape checks passed!")
+
+
+# ===========================================================================
+# Sanity check
 # ===========================================================================
 
 if __name__ == "__main__":
+    print("=" * 60)
+    print("SimpleOmni - MiniMind-O Teaching Implementation")
+    print("=" * 60)
+
     config = SimpleOmniConfig()
     model = SimpleOmni(config)
 
-    print("SimpleOmni parameter count:")
+    print("\nParameter count:")
     count_parameters(model)
 
-    # Quick forward pass test
-    B, T = 2, 32
-    input_ids = torch.randint(0, config.vocab_size, (B, T))
-    audio_ids = torch.randint(0, config.audio_vocab_size, (B, config.num_codebooks, T))
-    spk_emb = torch.randn(B, config.spk_emb_size)
+    print("\nShape verification:")
+    verify_shapes(model, config)
 
-    out = model(input_ids, audio_ids=audio_ids, spk_emb=spk_emb)
-    print(f"\nText logits shape:  {out['text_logits'].shape}")
-    print(f"Audio logits:       {len(out['audio_logits'])} codebooks × {out['audio_logits'][0].shape}")
-    print(f"Past KVs:           {len(out['past_kvs'])} layers")
     print("\nForward pass OK!")

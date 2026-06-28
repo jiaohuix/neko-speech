@@ -52,18 +52,33 @@
 ## 🚧 进行中 (6 个 Agent 并行开发)
 
 ### Ch03: WaveNet 神经声码器
-**Agent**: 运行中  
+**Agent**: ✅ 完成  
 **目标**: 用因果卷积替代 Griffin-Lim，提升音质  
 **交付物**:
-- [ ] `model.py` - WaveNet 架构（因果卷积 + 门控激活）
-- [ ] `train.py` - 训练脚本
-- [ ] `inference.py` - Mel → 波形
-- [ ] `README.md` - 原理 + 实验
+- [x] `model.py` (378行, 299核心) - WaveNet 架构 (~1.9M params)
+- [x] `train.py` (288行) - 训练脚本（AMP + 梯度裁剪）
+- [x] `inference.py` (249行) - 推理 + Griffin-Lim 对比
+- [x] `README.md` (434行) - 完整教程
 
-**核心原理**:
-- Dilated Causal Convolution
-- Gated Activation Unit
-- 残差连接 + 跳跃连接
+**验证结果**:
+- ✅ 语法检查通过
+- ✅ 形状验证通过 + 因果性验证
+- ✅ mu-law 精度：max error 0.0033
+- ✅ 训练验证（193 条音频）
+- ✅ 推理验证（生成 64 采样点）
+
+**核心指标**:
+- 参数量：1.9M
+- 感受野：6139 samples (0.384s @ 16kHz)
+- 初始 loss：~5.55 (= -log(1/256))
+
+**核心实现**:
+- CausalConv1d：左侧 padding 保证因果性
+- ResidualBlock：扩张卷积 + 门控激活 + mel 条件注入
+- 多级上采样：16x16=256
+- mu-law 编解码：8-bit 波形量化
+
+**核心创新**: Dilated Causal Convolution，自回归波形建模
 
 ---
 

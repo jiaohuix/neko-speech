@@ -303,6 +303,10 @@ def main():
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--save-dir", type=str, default="../checkpoints")
+    parser.add_argument("--max-duration", type=float, default=25,
+                        help="Max audio duration in seconds")
+    parser.add_argument("--max-mel-len", type=int, default=500,
+                        help="Max mel frames per sample")
     args = parser.parse_args()
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -313,7 +317,8 @@ def main():
         torch.backends.cudnn.enabled = False
 
     # Dataset
-    dataset = NekoDataset(args.data_dir, max_duration_sec=25, target_sr=16000)
+    dataset = NekoDataset(args.data_dir, max_duration_sec=args.max_duration,
+                          max_mel_len=args.max_mel_len, target_sr=16000)
     if len(dataset) == 0:
         print("[error] No data found. Run data/prepare.py first.")
         return

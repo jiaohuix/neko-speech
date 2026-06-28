@@ -117,18 +117,38 @@
 ---
 
 ### Ch05: VITS 端到端 TTS
-**Agent**: 运行中  
+**Agent**: ✅ 完成  
 **目标**: VAE + Flow + GAN 三合一，文本直接出波形  
 **交付物**:
-- [ ] `model.py` - VITS 主架构
-- [ ] `modules.py` - Flow/Encoder/Decoder
-- [ ] `train.py` - 多损失训练
-- [ ] `README.md` - VAE + Flow 原理
+- [x] `modules.py` (1000行) - 8 个子模块，全部带形状测试
+- [x] `model.py` (670行) - VITS 主架构 + MAS + 损失函数
+- [x] `train.py` (548行) - G/D 交替训练，多损失平衡
+- [x] `inference.py` (177行) - 端到端 Text → Waveform
+- [x] `README.md` (607行) - VAE + Flow + GAN 原理详解
 
-**核心原理**:
-- Conditional VAE
-- Normalizing Flow
-- Adversarial Training
+**核心模块**:
+| 模块 | 参数量 | 功能 |
+|------|--------|------|
+| TextEncoder | 2.8M | Transformer + 相对位置编码 → 先验 (μ_p, σ_p) |
+| PosteriorEncoder | 3.7M | WaveNet 门控卷积 → 后验 (μ_q, σ_q) |
+| Flow | 0.6M | 仿射耦合层可逆变换（误差 = 0） |
+| Generator | 12.8M | HiFi-GAN 解码器，256× 上采样 |
+| DurationPredictor | 0.3M | 时长预测 |
+| StochasticDurationPredictor | ~0.4M | 随机时长预测 |
+| Discriminator | 24.7M | 多周期判别器 [2,3,5,7,11] |
+
+**验证结果**:
+- ✅ 6 个子模块形状测试通过
+- ✅ Flow 可逆性：正向→逆变换误差 = 0.000000
+- ✅ 完整前向：text (B,12) → waveform (B,1,10240)
+- ✅ 训练验证（1 epoch）：mel=105.9, kl=141.2, dur=1.3, adv_g=0.72
+- ✅ 端到端推理 + 语速控制
+
+**核心创新**:
+- VAE：变分推断 + 重参数化 + KL 散度
+- Flow：归一化流，提高表达力
+- GAN：对抗训练，提升音质
+- MAS：单调对齐搜索，自动对齐文本-音频
 
 ---
 

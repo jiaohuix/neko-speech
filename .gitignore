@@ -50,8 +50,11 @@ chapters/**/outputs/
 data/raw/
 data/processed/
 
-# Generated figures
-chapters/**/figures/
+# Generated figures (high-res originals)
+chapters/**/figures/*.png
+chapters/**/figures/*.svg
+# But keep compressed versions for README embedding
+!chapters/**/figures/small/
 
 # Generated images
 skills/image-gen/imgs/

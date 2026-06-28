@@ -1,9 +1,9 @@
 {
   "model": "ch03_wavenet",
-  "timestamp": "2026-06-29T01:06:13.208539",
+  "timestamp": "2026-06-29T01:20:43.453157",
   "status": "complete",
-  "final_loss": 4.4421,
-  "train_time_total": 90.11170268058777,
+  "final_loss": 4.5001,
+  "train_time_total": 70.48650240898132,
   "epoch_times": [],
   "gpu_memory_mb": 0.0,
   "params": 729984,

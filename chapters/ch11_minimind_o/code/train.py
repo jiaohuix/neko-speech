@@ -150,6 +150,21 @@ def train_step(model, batch, optimizer, scaler, config, accumulation_step=1):
     audio_labels = batch["audio_labels"]
     mel_input = batch.get("mel_input")
 
+    # If mel_input is provided, pad labels for the mel prefix
+    # (mel features are prepended to the text sequence)
+    if mel_input is not None:
+        with torch.no_grad():
+            mel_feat_len = mel_input.shape[-1] // 4  # conv 4x downsample
+        # Pad text_labels with -100 at the front for mel prefix
+        pad = torch.full((text_labels.shape[0], mel_feat_len), -100,
+                         dtype=text_labels.dtype, device=text_labels.device)
+        text_labels = torch.cat([pad, text_labels], dim=1)
+        # Pad audio_labels similarly (audio logits cover full sequence)
+        audio_pad = torch.full(
+            (audio_labels.shape[0], config.num_codebooks, mel_feat_len), -100,
+            dtype=audio_labels.dtype, device=audio_labels.device)
+        audio_labels = torch.cat([audio_pad, audio_labels], dim=2)
+
     with torch.cuda.amp.autocast(dtype=torch.bfloat16,
                                   enabled=torch.cuda.is_available()):
         out = model(

@@ -130,18 +130,26 @@
 ---
 
 ### Ch08: Modern Models (F5-TTS, CosyVoice, IndexTTS)
-**Agent**: 运行中  
+**Agent**: ✅ 完成  
 **目标**: 从零实现 2-3 个现代模型简化版  
 **交付物**:
-- [ ] `f5_tts.py` - Flow Matching + DiT
-- [ ] `cosyvoice.py` - 零样本 TTS
-- [ ] `indextts.py` - 可控 TTS（可选）
-- [ ] `README.md` - 现代模型综述
+- [x] `f5_tts.py` - Flow Matching + Transformer (436行)
+- [x] `cosyvoice.py` - 零样本 TTS + Speaker Encoder (368行)
+- [x] `indextts.py` - 拼音/音调/时长控制 (340行)
+- [x] `train.py` - 训练脚本（3个模型）
+- [x] `inference.py` - 推理 demo + 可视化
+- [x] `README.md` - 现代模型综述（425行）
 
-**核心原理**:
-- F5-TTS: Flow Matching
-- CosyVoice: LLM + Codec
-- IndexTTS: 拼音/情感控制
+**验证结果**:
+- ✅ 语法检查通过
+- ✅ 形状验证通过
+- ✅ 训练 loss 下降（F5: 2.27→2.00, Cosy: 1.25→1.00, Index: 5.05→2.86）
+- ✅ 推理输出正常
+
+**核心创新**:
+1. F5-TTS: Flow Matching 训练目标，10-20 步 ODE 采样
+2. CosyVoice: Speaker Encoder 时间池化，3秒音频零样本克隆
+3. IndexTTS: Pinyin Embedding 解耦，四声控制
 
 ---
 

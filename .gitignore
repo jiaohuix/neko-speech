@@ -1,0 +1,63 @@
+# 系统文件
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# IDE - VSCode
+.vscode/
+*.code-workspace
+.history/
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# IDE - PyCharm
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+env/
+.venv/
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-error.log
+dist/
+build/
+
+# Java
+target/
+*.class
+*.jar
+*.war
+
+# C/C++
+*.o
+*.exe
+*.dll
+*.so
+*.a
+build/
+cmake-build-*/
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+tmp/
+temp/
+
+# 环境变量配置
+.env
+.env.local
+.env.dev
+ref_codes/
+spec/

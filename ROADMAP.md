@@ -12,38 +12,58 @@
 
 ---
 
-## 2. 已完成与计划中内容
+## 2. 章节总览（12 章）
 
 | 章节 | 内容 | 状态 | 参数量 | 关键特性 |
 |------|------|------|--------|----------|
-| **Ch01** | 音频基础：波形、采样、FFT、STFT、Mel、Griffin-Lim | ✅ 完成 | - | 5个演示脚本 + 5张Neko插画 |
-| **Ch02** | Tacotron2：Seq2Seq + Attention | 🔄 训练中 | 26.7M | 自回归基线 |
+| **Ch01** | 音频基础：波形、采样、FFT、STFT、Mel、Griffin-Lim | ✅ 完成 | — | 5个演示脚本 + 5张Neko插画 |
+| **Ch02** | Tacotron2：Seq2Seq + Attention | ✅ 完成 | 26.7M | 自回归基线 |
 | **Ch03** | WaveNet：因果卷积声码器 | ✅ 完成 | 1.9M | 感受野 6139 |
-| **Ch04** | FastSpeech2：非自回归并行 | ✅ 完成 | 7.55M | **19x 实时** |
+| **Ch04** | FastSpeech2：非自回归并行 | ✅ 完成 | 7.55M | 19× 实时 |
 | **Ch05** | VITS：VAE+Flow+GAN 端到端 | ✅ 完成 | ~45M | 最复杂章节 |
-| **Ch06** | Neural Codec：RVQ-VAE | ✅ 完成 | 1.3M | 8× 时间压缩 |
+| **Ch06** | Neural Audio Codec：RVQ-VAE | ✅ 完成 | 1.3M | 8× 时间压缩 |
 | **Ch07** | VALL-E：Codec Language Model | ✅ 完成 | 10.8M | 零样本克隆 |
-| **Ch08** | Modern Models: F5-TTS/CosyVoice/IndexTTS | ✅ 完成 | ~5M | Flow Matching |
-| **Ch09** | GPT-SoVITS: 少样本声音克隆 | 🚧 实施中 | ~50M | AR+VITS 两阶段 |
-| **Ch10** | VoxCPM: Tokenizer-free TTS | 🚧 实施中 | ~100M | 扩散自回归 |
-| **Ch11** | MiniMind-O: 全模态语音模型 | 📋 计划中 | ~115M | Thinker-Talker |
-| **Ch12** | 端侧部署: ONNX/MNN/sherpa-onnx | 📋 计划中 | - | Android/iOS |
-| **数据集** | Neko Audio 80K | 🔄 下载中 | - | ~858条/目标3000+ |
+| **Ch08** | Modern Models: F5-TTS / CosyVoice | ✅ 完成 | ~5M | Flow Matching |
+| **Ch09** | GPT-SoVITS: 少样本声音克隆 | 🔄 代码完成，README 编写中 | ~50M | AR+VITS 两阶段 |
+| **Ch10** | VoxCPM: Tokenizer-free TTS | 🔄 代码完成，README 编写中 | ~100M | 扩散自回归 |
+| **Ch11** | MiniMind-O: 全模态语音模型 | 🔄 代码完成，README 编写中 | ~115M | Thinker-Talker |
+| **Ch12** | 端侧部署: ONNX / MNN / sherpa-onnx | 🔄 进行中 | — | Android/iOS 推理 |
 
-### Ch02 当前状态
-
-- **模型**：26.7M参数，Encoder-Decoder-PostNet结构
-- **训练**：20 epoch，batch=8，AMP混合精度，cudnn禁用
-- **数据**：16kHz重采样，25秒截断，动态字符表
-- **已修复**：24kHz→16kHz重采样、中文tokenizer、loss mask shape、Griffin-Lim vocoder
-- **已知限制**：
-  - inference decoder 使用 mean pooling 而非真正的 Location-Sensitive Attention（简化版）
-  - 数据量仍偏少（~500条有效），TTS音质有限
-  - 自回归推理慢，Griffin-Lim音质差
+**状态说明**：✅ 完成 = 代码+文档均完成 | 🔄 进行中 = 代码或文档尚有一部分未完成 | 📋 计划中 = 尚未开始
 
 ---
 
-## 3. 全局架构
+## 3. 项目产出状态
+
+### 教材
+
+| 产出 | 状态 | 说明 |
+|------|------|------|
+| PDF 教材 | ✅ 已生成 | 114 页，覆盖 Ch01–Ch08 |
+| 章节 README | 🔄 编写中 | Ch01–Ch08 完成，Ch09–Ch11 编写中 |
+
+### 部署与推理
+
+| 项目 | 状态 | 说明 |
+|------|------|------|
+| ONNX 模型转换 | ✅ 完成 | 主要模型已导出 ONNX |
+| MNN 模型转换 | ✅ 完成 | 适配移动端推理框架 |
+| 推理 Benchmark | ✅ 完成 | 延迟/内存/音质对比测试完成 |
+| sherpa-onnx 集成 | 🔄 进行中 | 端侧推理引擎对接 |
+
+### 实验与训练
+
+| 项目 | 状态 | 说明 |
+|------|------|------|
+| Ch02 Tacotron2 训练 | 🔄 进行中 | 26.7M 参数，AMP FP16 |
+| Ch09 GPT-SoVITS 训练 | 🔄 进行中 | AR+VITS 两阶段训练 |
+| Ch10 VoxCPM 训练 | 🔄 进行中 | 扩散自回归训练 |
+| Ch11 MiniMind-O 训练 | 🔄 进行中 | Thinker-Talker 训练 |
+| 数据集 Neko Audio 80K | 🔄 下载中 | ~858 条 / 目标 3000+ |
+
+---
+
+## 4. 全局架构
 
 ```
 neko-speech/
@@ -93,6 +113,15 @@ neko-speech/
 |   |   |   |-- train.py           # 两阶段训练脚本
 |   |   |-- checkpoints/           # 模型保存（gitignore）
 |   |   |-- outputs/               # 生成音频（gitignore）
+|   |
+|   |-- ch12_deployment/
+|       |-- README.md
+|       |-- code/
+|       |   |-- export_onnx.py     # ONNX 导出
+|       |   |-- export_mnn.py      # MNN 转换
+|       |   |-- benchmark.py       # 推理性能测试
+|       |-- onnx/                  # ONNX 模型（gitignore）
+|       |-- mnn/                   # MNN 模型（gitignore）
 |
 |-- skills/
 |   |-- image-gen/             # Neko插画生成
@@ -119,7 +148,7 @@ chXX_name/
 
 ---
 
-## 4. 开发规范
+## 5. 开发规范
 
 ### 代码规范
 1. **每章独立**：code/ 目录下的脚本可以独立运行，不依赖其他章
@@ -144,48 +173,21 @@ chXX_name/
 
 ---
 
-## 5. 后续章节分工
+## 6. 当前进行中工作
 
-| 章节 | 负责人 | 依赖 | 交付物 | 预估难度 |
-|------|--------|------|--------|----------|
-| **Ch03 WaveNet** | TBD | Ch01音频基础 | 神经声码器，替代Griffin-Lim | 中 |
-| **Ch04 FastSpeech2** | TBD | Ch02 Tacotron2 | 非自回归TTS，并行生成 | 中 |
-| **Ch05 VITS** | TBD | Ch03+Ch04 | 端到端+flow，音质最佳 | 高 |
-| **Ch06 GPT-SoVITS** | TBD | Ch02+Ch03 | Few-shot音色克隆，实用路线 | 高 |
-| **Ch07 VALL-E** | Done | Ch01+Ch02 | Codec LM 范式，AR+NAR 零样本 TTS | 高 |
-| **Ch08 SoVITS / RVC** | TBD | Ch06+Ch07 | 歌声转换/实时变声 | 高 |
-| **Ch09 现代模型** | TBD | 前面全部 | F5-TTS, CosyVoice 等最新工作 | 高 |
-| **Ch10 部署** | TBD | 前面全部 | ONNX导出, CPU推理优化, 本地GUI | 中 |
+### Ch09–Ch11 README 编写
+- [ ] Ch09 GPT-SoVITS README 完成
+- [ ] Ch10 VoxCPM README 完成
+- [ ] Ch11 MiniMind-O README 完成
 
-### 每章开发 Checklist
+### Ch12 部署收尾
+- [ ] sherpa-onnx 集成测试通过
+- [ ] 端侧推理 demo 完成（Android 或 iOS）
 
-开发者在开始某一章之前，必须阅读：
-1. `AGENTS.md` — 理解项目治理原则
-2. `ROADMAP.md` — 理解全局架构和前置依赖
-3. 前一章的 `README.md` 和 `code/` — 理解接口约定
-
-每章交付前必须满足：
-- [ ] `README.md` 教程完整（原理+代码+习题）
-- [ ] `code/` 可独立运行，通过形状验证
-- [ ] 如有训练，提供训练日志和 loss 曲线
-- [ ] 如有推理，提供示例输出
-- [ ] 不提交大文件（checkpoints/ outputs/ 在 .gitignore）
-- [ ] 代码通过 `python -m py_compile` 检查
-
----
-
-## 6. 当前未解决问题
-
-### Ch02 Tacotron2（训练进行中）
-- [ ] 20 epoch 训练完成（当前 epoch 13/20）
-- [ ] inference decoder 缺少真正的 Location-Sensitive Attention
-- [ ] 数据量需扩充到 3000+ 条
-- [ ] 需要评估：reconstruction MSE 降到多少算"可听"？
-
-### 基础设施
-- [ ] 统一的音频预处理工具（resample + VAD + 截断）
-- [ ] 统一的 checkpoint 管理（自动保存 best + 最新）
-- [ ] 数据集质量检查脚本（时长分布、采样率一致性）
+### 训练与数据
+- [ ] 数据集扩充至 3000+ 条
+- [ ] Ch09/Ch10/Ch11 模型训练收敛
+- [ ] PDF 教材更新覆盖 Ch09–Ch11
 
 ---
 

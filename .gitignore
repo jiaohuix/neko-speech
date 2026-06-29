@@ -40,6 +40,27 @@ spec/
 # LARGE / GENERATED FILES — Do not commit
 # ============================================================================
 
+# 模型权重 & 导出（全局，体积大且可重新生成）
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.mnn
+*.tflite
+*.npy
+*.npz
+
+# 全部 checkpoints / 导出模型目录
+experiments/checkpoints/
+deployment/onnx_models/
+deployment/mnn_models/
+deployment/mnn_models_fp16/
+**/onnx_models/
+
+# 构建产物
+build/
+
 # Model checkpoints (can be 100MB+)
 chapters/**/checkpoints/
 
